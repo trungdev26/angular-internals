@@ -1,0 +1,71 @@
+<nz-alert nzType="info" nzShowIcon [nzMessage]="theoryTpl"></nz-alert>
+
+<ng-template #theoryTpl>
+  <ul>
+    <li><b>Điểm rủi ro</b> – phép tính nặng ~4000 vòng lặp, hiển thị ở cột cuối bảng.</li>
+    <li>
+      <b>Strategy &amp; Stress test</b> – đổi để so sánh FPS giữa Default, OnPush, OnPush + Pure
+      Pipe.
+    </li>
+    <li>Xem giải thích chi tiết ở trang <b>Lý thuyết</b> (menu bên trái).</li>
+  </ul>
+</ng-template>
+
+<div class="toolbar">
+  <div class="toolbar-group">
+    <span>Số dòng:</span>
+    <nz-select [(ngModel)]="rowCount" (ngModelChange)="onRowCountChange()" style="width: 100px">
+      <nz-option *ngFor="let n of rowCountOptions" [nzValue]="n" [nzLabel]="n + ''"></nz-option>
+    </nz-select>
+  </div>
+
+  <div class="toolbar-group">
+    <nz-radio-group [(ngModel)]="strategy" (ngModelChange)="resetCounter()">
+      <label nz-radio-button nzValue="default">Default</label>
+      <label nz-radio-button nzValue="onpush">OnPush</label>
+      <label nz-radio-button nzValue="onpush-pipe">OnPush + Pure Pipe</label>
+    </nz-radio-group>
+
+    <label nz-checkbox [(ngModel)]="stressMode" (ngModelChange)="onStressModeChange($event)">
+      Stress test (CD mỗi frame)
+    </label>
+  </div>
+
+  <div class="toolbar-group">
+    <button nz-button nzType="default" (click)="randomUpdate()">Cập nhật ngẫu nhiên 1 dòng</button>
+    <button nz-button nzType="default" (click)="resetCounter()">Reset bộ đếm</button>
+  </div>
+
+  <div class="toolbar-group toolbar-stats">
+    <app-fps-meter></app-fps-meter>
+    <nz-tag nzColor="blue">Tick: {{ tickCount }}</nz-tag>
+    <nz-tag nzColor="green">Tổng lượt CD check: {{ counter.checkCount }}</nz-tag>
+  </div>
+</div>
+
+<nz-table [nzData]="rows" [nzShowPagination]="false" [nzScroll]="{ y: '600px' }">
+  <thead>
+    <tr>
+      <th>STT</th>
+      <th>Tên chỉ số</th>
+      <th>Giá trị</th>
+      <th>Đơn vị</th>
+      <th>Khoảng tham chiếu</th>
+      <th>Đánh giá</th>
+      <th>Trạng thái ký</th>
+      <th>Điểm rủi ro</th>
+      <th>Render</th>
+    </tr>
+  </thead>
+  <tbody>
+    <ng-container *ngIf="strategy === 'default'">
+      <tr app-indicator-row-default *ngFor="let row of rows; trackBy: trackById" [data]="row"></tr>
+    </ng-container>
+    <ng-container *ngIf="strategy === 'onpush'">
+      <tr app-indicator-row-onpush *ngFor="let row of rows; trackBy: trackById" [data]="row"></tr>
+    </ng-container>
+    <ng-container *ngIf="strategy === 'onpush-pipe'">
+      <tr app-indicator-row-onpush-pipe *ngFor="let row of rows; trackBy: trackById" [data]="row"></tr>
+    </ng-container>
+  </tbody>
+</nz-table>

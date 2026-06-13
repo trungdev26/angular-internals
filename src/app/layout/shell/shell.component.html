@@ -1,0 +1,45 @@
+<nz-layout class="app-layout">
+  <nz-sider nzCollapsible [(nzCollapsed)]="collapsed" [nzWidth]="240" nzTheme="dark">
+    <div class="logo">{{ collapsed ? 'AI' : 'Angular Internals' }}</div>
+    <ul nz-menu nzMode="inline" nzTheme="dark" [nzInlineCollapsed]="collapsed">
+      <li
+        nz-submenu
+        *ngFor="let section of menuSections"
+        [nzTitle]="section.title"
+        [nzIcon]="section.icon"
+        [nzOpen]="!!section.open"
+        [nzDisabled]="!!section.disabled"
+      >
+        <ul>
+          <li
+            nz-menu-item
+            *ngFor="let item of section.items"
+            [nzDisabled]="!item.link"
+            [routerLink]="item.link"
+            routerLinkActive="ant-menu-item-selected"
+          >
+            {{ item.label }}
+          </li>
+        </ul>
+      </li>
+    </ul>
+  </nz-sider>
+  <nz-layout>
+    <nz-header class="app-header">Angular Internals Docs</nz-header>
+    <nz-content class="app-content" #appContent (scroll)="onContentScroll($event)">
+      <router-outlet></router-outlet>
+    </nz-content>
+  </nz-layout>
+</nz-layout>
+
+<button
+  type="button"
+  class="back-to-top"
+  [class.visible]="showBackToTop"
+  (click)="scrollToTop()"
+  aria-label="Lên đầu trang"
+>
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+    <path d="M12 5l-7 7h4v7h6v-7h4z" />
+  </svg>
+</button>

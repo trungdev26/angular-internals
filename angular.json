@@ -35,6 +35,9 @@
               "src/assets"
             ],
             "styles": [
+              "./node_modules/ng-zorro-antd/ng-zorro-antd.min.css",
+              "./node_modules/github-markdown-css/github-markdown-light.css",
+              "./node_modules/prismjs/themes/prism.css",
               "src/styles.css"
             ],
             "scripts": []
@@ -94,6 +97,9 @@
               "src/assets"
             ],
             "styles": [
+              "./node_modules/ng-zorro-antd/ng-zorro-antd.min.css",
+              "./node_modules/github-markdown-css/github-markdown-light.css",
+              "./node_modules/prismjs/themes/prism.css",
               "src/styles.css"
             ],
             "scripts": []
@@ -101,5 +107,8 @@
         }
       }
     }
+  },
+  "cli": {
+    "analytics": "f0ddf305-578f-46cc-af46-ec2826e11ba5"
   }
 }

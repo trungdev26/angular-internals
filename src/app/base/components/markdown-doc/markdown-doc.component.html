@@ -1,0 +1,33 @@
+<div class="doc-layout">
+  <markdown class="markdown-body" [src]="docSrc" (ready)="onReady()"></markdown>
+
+  <nav class="doc-toc" *ngIf="tocItems.length" aria-label="Mục lục trang">
+    <div class="doc-toc-title">Trên trang này</div>
+    <ul>
+      <li *ngFor="let item of tocItems" [class.active]="activeId === item.id">
+        <div class="toc-row">
+          <a (click)="scrollToHeading(item.id)">{{ item.text }}</a>
+          <button
+            *ngIf="item.children.length"
+            type="button"
+            class="toc-toggle"
+            [class.expanded]="isExpanded(item)"
+            (click)="toggleExpand(item, $event)"
+            [attr.aria-label]="isExpanded(item) ? 'Thu gọn mục con' : 'Mở rộng mục con'"
+          >
+            <svg viewBox="0 0 24 24" width="12" height="12">
+              <path d="M8 5l8 7-8 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+        </div>
+        <ul *ngIf="item.children.length && isExpanded(item)">
+          <li *ngFor="let child of item.children" [class.active]="activeId === child.id">
+            <div class="toc-row">
+              <a (click)="scrollToHeading(child.id)">{{ child.text }}</a>
+            </div>
+          </li>
+        </ul>
+      </li>
+    </ul>
+  </nav>
+</div>

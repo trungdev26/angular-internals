@@ -1,0 +1,33 @@
+<td>{{ checkRender() }}{{ data.id }}</td>
+<td>{{ data.tenChiSo }}</td>
+<td>
+  <nz-input-number
+    [(ngModel)]="data.giaTri"
+    [nzMin]="0"
+    [nzMax]="999"
+    [nzStep]="0.1"
+    style="width: 110px"
+  ></nz-input-number>
+</td>
+<td>{{ data.donVi }}</td>
+<td>{{ data.khoangThamChieu }}</td>
+<td>
+  <nz-select [(ngModel)]="data.danhGia" style="width: 140px">
+    <nz-option nzValue="binh_thuong" nzLabel="Bình thường"></nz-option>
+    <nz-option nzValue="cao" nzLabel="Cao"></nz-option>
+    <nz-option nzValue="thap" nzLabel="Thấp"></nz-option>
+  </nz-select>
+</td>
+<td>
+  <nz-select [(ngModel)]="data.trangThai" style="width: 120px">
+    <nz-option nzValue="cho_ky" nzLabel="Chờ ký"></nz-option>
+    <nz-option nzValue="da_ky" nzLabel="Đã ký"></nz-option>
+    <nz-option nzValue="huy" nzLabel="Huỷ"></nz-option>
+  </nz-select>
+</td>
+<td>
+  <nz-tag [nzColor]="riskColor(riskScore)">{{ riskScore }}</nz-tag>
+</td>
+<td>
+  <nz-tag>{{ renderCount }}</nz-tag>
+</td>

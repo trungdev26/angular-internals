@@ -1,0 +1,142 @@
+:host {
+  display: block;
+
+  ::ng-deep .markdown-body h2,
+  ::ng-deep .markdown-body h3 {
+    scroll-margin-top: 12px;
+  }
+}
+
+.doc-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 32px;
+}
+
+.markdown-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-toc {
+  flex-shrink: 0;
+  width: 260px;
+  position: sticky;
+  top: 16px;
+  align-self: flex-start;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.5;
+  scrollbar-width: thin;
+  scrollbar-color: #d9d9d9 transparent;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: #d9d9d9;
+    border-radius: 3px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+.doc-toc-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #8c8c8c;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.doc-toc ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.doc-toc ul ul {
+  padding-left: 12px;
+  margin-top: 2px;
+}
+
+.doc-toc li {
+  margin: 1px 0;
+}
+
+.toc-row {
+  display: flex;
+  align-items: center;
+  border-left: 2px solid transparent;
+  border-radius: 0 4px 4px 0;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+
+  &:hover {
+    background: #f5f5f5;
+  }
+
+  &:hover a,
+  &:hover .toc-toggle {
+    color: #1677ff;
+  }
+}
+
+.doc-toc a {
+  flex: 1;
+  display: block;
+  min-width: 0;
+  padding: 3px 8px;
+  color: #595959;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.toc-toggle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin: 0 4px 0 2px;
+  border: none;
+  background: transparent;
+  color: #bfbfbf;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: transform 0.15s ease, color 0.15s ease;
+
+  svg {
+    transition: transform 0.15s ease;
+  }
+
+  &.expanded svg {
+    transform: rotate(90deg);
+  }
+}
+
+.doc-toc li.active > .toc-row {
+  background: #e6f4ff;
+  border-left-color: #1677ff;
+}
+
+.doc-toc li.active > .toc-row a,
+.doc-toc li.active > .toc-row .toc-toggle {
+  color: #1677ff;
+}
+
+.doc-toc li.active > .toc-row a {
+  font-weight: 500;
+}
+
+@media (max-width: 1280px) {
+  .doc-toc {
+    display: none;
+  }
+}

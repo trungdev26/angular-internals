@@ -1,1 +1,43 @@
 /* You can add global styles to this file, and also import other style files */
+
+.markdown-body img {
+  display: block;
+  max-width: 100%;
+  width: 420px;
+  margin: 8px 0 16px;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+  cursor: zoom-in;
+}
+
+.markdown-body .callout {
+  padding: 12px 16px;
+  border-radius: 4px;
+  border: 1px solid #f0f0f0;
+  margin-bottom: 16px;
+}
+
+.markdown-body .callout-intro {
+  background: #fff7e6;
+  border-color: #ffd591;
+}
+
+.markdown-body .callout-key {
+  background: #fff1f0;
+  border-color: #ffa39e;
+}
+
+.markdown-body .callout-checklist {
+  background: #f6ffed;
+  border-color: #b7eb8f;
+}
+
+.markdown-body .callout-next-step {
+  background: #e6f4ff;
+  border-color: #91caff;
+}
+
+.markdown-body .callout > h3:first-child,
+.markdown-body .callout > h2:first-child {
+  margin-top: 0;
+}
