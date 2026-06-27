@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(volta --version)",
+      "Bash(volta pin *)"
+    ]
+  }
+}

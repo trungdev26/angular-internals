@@ -16,7 +16,15 @@ import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCheckboxModule } from 'ng-zorro-antd/checkbox';
 import { NzIconModule } from 'ng-zorro-antd/icon';
-import { ThunderboltOutline, ClockCircleOutline } from '@ant-design/icons-angular/icons';
+import {
+  ThunderboltOutline,
+  ClockCircleOutline,
+  DatabaseOutline,
+  ApartmentOutline,
+  CodeOutline,
+  ClusterOutline,
+  FormOutline,
+} from '@ant-design/icons-angular/icons';
 import { NzImageModule } from 'ng-zorro-antd/image';
 import { NzInputNumberModule } from 'ng-zorro-antd/input-number';
 import { NzLayoutModule } from 'ng-zorro-antd/layout';
@@ -55,7 +63,15 @@ registerLocaleData(en);
     NzAlertModule,
     NzButtonModule,
     NzCheckboxModule,
-    NzIconModule.forRoot([ThunderboltOutline, ClockCircleOutline]),
+    NzIconModule.forRoot([
+      ThunderboltOutline,
+      ClockCircleOutline,
+      DatabaseOutline,
+      ApartmentOutline,
+      CodeOutline,
+      ClusterOutline,
+      FormOutline,
+    ]),
     NzImageModule,
     NzInputNumberModule,
     NzLayoutModule,

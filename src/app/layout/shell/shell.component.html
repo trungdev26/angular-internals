@@ -1,31 +1,46 @@
 <nz-layout class="app-layout">
-  <nz-sider nzCollapsible [(nzCollapsed)]="collapsed" [nzWidth]="240" nzTheme="dark">
-    <div class="logo">{{ collapsed ? 'AI' : 'Angular Internals' }}</div>
-    <ul nz-menu nzMode="inline" nzTheme="dark" [nzInlineCollapsed]="collapsed">
+  <nz-sider class="app-sider" nzCollapsible [(nzCollapsed)]="collapsed" [nzWidth]="248" nzTheme="light">
+    <div class="logo">
+      <span class="logo__badge">DI</span>
+      <span class="logo__text">Dev Internals</span>
+    </div>
+    <ul nz-menu class="app-menu" nzMode="inline" nzTheme="light" [nzInlineCollapsed]="collapsed">
       <li
         nz-submenu
         *ngFor="let section of menuSections"
+        class="app-menu__section"
         [nzTitle]="section.title"
         [nzIcon]="section.icon"
         [nzOpen]="!!section.open"
-        [nzDisabled]="!!section.disabled"
       >
         <ul>
           <li
-            nz-menu-item
-            *ngFor="let item of section.items"
-            [nzDisabled]="!item.link"
-            [routerLink]="item.link"
-            routerLinkActive="ant-menu-item-selected"
+            nz-submenu
+            *ngFor="let group of section.groups"
+            class="app-menu__group"
+            [nzTitle]="group.title"
+            [nzIcon]="group.icon"
+            [nzOpen]="!!group.open"
+            [nzDisabled]="!!group.disabled"
           >
-            {{ item.label }}
+            <ul>
+              <li
+                nz-menu-item
+                *ngFor="let item of group.items"
+                [nzDisabled]="!item.link"
+                [routerLink]="item.link"
+                routerLinkActive="ant-menu-item-selected"
+              >
+                {{ item.label }}
+              </li>
+            </ul>
           </li>
         </ul>
       </li>
     </ul>
   </nz-sider>
   <nz-layout>
-    <nz-header class="app-header">Angular Internals Docs</nz-header>
+    <nz-header class="app-header">Dev Internals Docs</nz-header>
     <nz-content class="app-content" #appContent (scroll)="onContentScroll($event)">
       <router-outlet></router-outlet>
     </nz-content>
