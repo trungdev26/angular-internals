@@ -836,7 +836,7 @@ Một OnPush component/subtree thường được check khi có một trong các
 1. Input từ cha truyền xuống có giá trị mới (reference mới).
 2. Có event xảy ra trong chính subtree đó.
 3. Component hoặc ancestor được mark dirty/markForCheck.
-4. AsyncPipe nhận emission mới và tự markForCheck.
+4. AsyncPipe nhận emission mới và tự markForCheck ([§7.8](#78-asyncpipe)).
 5. detectChanges được gọi thủ công cho view/subtree đó.
 ```
 
@@ -1091,7 +1091,7 @@ refreshNow() {
 | Tình huống | Nên dùng |
 | --- | --- |
 | Component `OnPush`, data đổi từ subscription thủ công | `markForCheck()` |
-| Component `OnPush`, dùng `async pipe` | Thường không cần gọi tay |
+| Component `OnPush`, dùng `async pipe` | Thường không cần gọi tay — xem [§7.8](#78-asyncpipe) |
 | Data đổi do `@Input` reference mới | Không cần gọi tay |
 | Data đổi do event trong component | Thường không cần gọi tay |
 | View đã `detach()` và muốn refresh ngay | `detectChanges()` |
@@ -1116,6 +1116,82 @@ interval(2000).subscribe(() => {
 `detectChanges()` ở đây có chủ đích: kiểm soát nhịp check local, thay vì để table bị kéo vào mọi global CD tick.
 
 Quy tắc chung: ưu tiên data flow đúng + OnPush + async pipe; chỉ dùng `ChangeDetectorRef` thủ công khi có lý do rõ; nếu phải dùng nhiều `detectChanges()`, nghi ngờ thiết kế state/data flow; nếu dùng `detach()`, phải có chiến lược `reattach()`/`detectChanges()` rõ ràng.
+
+### 7.8. AsyncPipe
+
+`AsyncPipe` (`| async`) là pipe có sẵn của Angular, subscribe trực tiếp vào `Observable`/`Promise` ngay trong template:
+
+```html
+<span>{{ price$ | async }}</span>
+```
+
+Về hiệu ứng, dòng trên tương đương với:
+
+```ts
+ngOnInit() {
+  this.sub = this.price$.subscribe(value => {
+    this.price = value;
+    this.cdr.markForCheck();
+  });
+}
+
+ngOnDestroy() {
+  this.sub.unsubscribe();
+}
+```
+
+nhưng Angular tự làm cả 3 việc: subscribe, gọi `markForCheck()` mỗi khi `price$` emit giá trị mới, và `unsubscribe()` khi view bị destroy.
+
+**Vì sao AsyncPipe đủ cho OnPush** — đây chính là điều kiện 4 ở [§6.2](#62-điều-kiện-để-onpush-component-được-check): "AsyncPipe nhận emission mới và tự markForCheck". Khác với mutate object ([§6.4](#64-các-lỗi-thường-gặp-với-onpush)), AsyncPipe không cần Angular so sánh reference của object gốc — pipe tự lưu giá trị mới nhất và tự đánh dấu view dirty, nên component `OnPush` không bị skip ở tick kế tiếp:
+
+```ts
+@Component({
+  selector: 'app-price-ticker',
+  template: `<span>{{ price$ | async }}</span>`,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class PriceTickerComponent {
+  price$ = this.priceService.price$;
+  constructor(private priceService: PriceService) {}
+}
+```
+
+So với cách subscribe tay ở [§7.2](#72-markforcheck), component này không còn `OnInit`/`OnDestroy`/`ChangeDetectorRef`/`Subscription`.
+
+**Nhiều `| async` trên cùng một Observable = nhiều subscription**
+
+```html
+<span>{{ (data$ | async)?.price }}</span>
+<span>{{ (data$ | async)?.volume }}</span>
+```
+
+Mỗi `| async` ở trên là một subscription riêng vào `data$`. Cách tránh — alias ra biến để chỉ subscribe một lần:
+
+```html
+@if (data$ | async; as data) {
+  <span>{{ data.price }}</span>
+  <span>{{ data.volume }}</span>
+}
+```
+
+hoặc cú pháp cũ:
+
+```html
+<ng-container *ngIf="data$ | async as data">
+  <span>{{ data.price }}</span>
+  <span>{{ data.volume }}</span>
+</ng-container>
+```
+
+**Áp dụng cho list OnPush** — nếu `rows` đến từ `rows$: Observable<ChiSoMau[]>`:
+
+```html
+@if (rows$ | async; as rows) {
+  <tr app-indicator-row-onpush *ngFor="let row of rows; trackBy: trackById" [data]="row"></tr>
+}
+```
+
+Mỗi khi `rows$` emit mảng mới (reference mới), AsyncPipe tự `markForCheck()`, các row `OnPush` nhận `[data]` reference mới → được check — cùng cơ chế với `randomUpdate()` ở [§16.5](#165-pure-pipe--mutate-object--vì-sao-điểm-rủi-ro-không-cập-nhật-ngay), nhưng không cần `subscribe`/`markForCheck` thủ công trong component.
 
 ---
 

@@ -4,19 +4,49 @@ import { MarkdownDocComponent } from './base/components/markdown-doc/markdown-do
 import { IndicatorsTableComponent } from './features/change-detection/components/indicators-table.component';
 
 const routes: Routes = [
-  { path: '', redirectTo: 'change-detection/theory', pathMatch: 'full' },
+  { path: '', redirectTo: 'angular/change-detection/theory', pathMatch: 'full' },
   {
-    path: 'change-detection',
+    path: 'angular/change-detection',
     children: [
       {
         path: 'theory',
         component: MarkdownDocComponent,
-        data: { docSrc: 'assets/docs/change-detection/theory.md' },
+        data: { docSrc: 'assets/docs/angular/change-detection/theory.md' },
       },
       { path: 'demo', component: IndicatorsTableComponent },
     ],
   },
-  { path: '**', redirectTo: 'change-detection/theory' },
+  {
+    path: 'angular/base-component-pattern',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/angular/base-component-pattern/theory.md' },
+      },
+    ],
+  },
+  {
+    path: 'angular/forms',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/angular/forms/theory.md' },
+      },
+    ],
+  },
+  {
+    path: 'system-design/data-storage-strategy',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/system-design/data-storage-strategy/theory.md' },
+      },
+    ],
+  },
+  { path: '**', redirectTo: 'angular/change-detection/theory' },
 ];
 
 @NgModule({
