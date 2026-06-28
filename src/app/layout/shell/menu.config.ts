@@ -38,6 +38,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         items: [{ label: 'Lý thuyết', link: '/angular/base-component-pattern/theory' }],
       },
       {
+        title: 'Component Lifecycle',
+        icon: 'sync',
+        items: [{ label: 'Lý thuyết', link: '/angular/component-lifecycle/theory' }],
+      },
+      {
         title: 'Forms',
         icon: 'form',
         items: [{ label: 'Lý thuyết', link: '/angular/forms/theory' }],
@@ -58,6 +63,11 @@ export const MENU_SECTIONS: MenuSection[] = [
         items: [{ label: 'Lý thuyết', link: '/angular/state-management/theory' }],
       },
       {
+        title: 'Dependency Injection',
+        icon: 'deployment-unit',
+        items: [{ label: 'Lý thuyết', link: '/angular/dependency-injection/theory' }],
+      },
+      {
         title: 'Sắp có',
         icon: 'clock-circle',
         disabled: true,
@@ -75,6 +85,30 @@ export const MENU_SECTIONS: MenuSection[] = [
         icon: 'database',
         items: [{ label: 'Lý thuyết', link: '/system-design/data-storage-strategy/theory' }],
       },
+      {
+        title: 'Cache',
+        icon: 'thunderbolt',
+        items: [{ label: 'Lý thuyết', link: '/system-design/cache/theory' }],
+      },
+      {
+        title: 'Load Parameter',
+        icon: 'line-chart',
+        items: [{ label: 'Lý thuyết', link: '/system-design/load-parameter/theory' }],
+      },
+      {
+        title: 'Case Studies',
+        icon: 'experiment',
+        items: [
+          {
+            label: '01. Refresh cache nhiều nguồn',
+            link: '/system-design/case-studies/cache-refresh-multi-source',
+          },
+          {
+            label: '02. Hàng chờ khám bệnh',
+            link: '/system-design/case-studies/clinic-queue-current-load',
+          },
+        ],
+      },
     ],
   },
   {
@@ -85,7 +119,22 @@ export const MENU_SECTIONS: MenuSection[] = [
       {
         title: 'Nền tảng',
         icon: 'apartment',
-        items: [{ label: 'Tư duy thiết kế', link: '/design-patterns/foundation' }],
+        items: [
+          { label: 'Tư duy thiết kế', link: '/design-patterns/foundation' },
+          { label: 'Creational Patterns', link: '/design-patterns/creational' },
+          { label: 'Structural Patterns', link: '/design-patterns/structural' },
+          { label: 'Behavioral Patterns', link: '/design-patterns/behavioral' },
+        ],
+      },
+      {
+        title: 'Case Studies',
+        icon: 'cluster',
+        items: [
+          {
+            label: '01. System Design ThinkingPayment Provider Selection',
+            link: '/design-patterns/case-studies/payment-provider-selection',
+          },
+        ],
       },
     ],
   },
@@ -122,6 +171,14 @@ export const MENU_SECTIONS: MenuSection[] = [
             label: '01. Order List Production',
             link: '/frontend-engineering/case-order-list-production',
           },
+          {
+            label: '02. Multi-step Form Production',
+            link: '/frontend-engineering/case-multi-step-form-production',
+          },
+          {
+            label: '03. Unsaved Changes Detection',
+            link: '/frontend-engineering/case-unsaved-changes-detection',
+          },
         ],
       },
     ],
@@ -135,10 +192,21 @@ export const MENU_SECTIONS: MenuSection[] = [
         title: 'Nền tảng',
         icon: 'code',
         items: [
-          { label: '01. Mindset & Clean Code', link: '/backend-engineering/code-like-senior' },
+          { 
+            label: '01. Mindset & Clean Code', 
+            link: '/backend-engineering/code-like-senior' 
+          },
           {
-            label: '02. Architecture & Layering',
+            label: '02. Review code như Middle/Senior',
+            link: '/backend-engineering/review-code-middle-senior',
+          },
+          {
+            label: '03. Architecture & Layering',
             link: '/backend-engineering/architecture-layering',
+          },
+          {
+            label: '04. System Design Thinking',
+            link: '/backend-engineering/system-design-thinking',
           },
         ],
       },

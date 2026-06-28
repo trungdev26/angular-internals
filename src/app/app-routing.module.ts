@@ -27,6 +27,16 @@ const routes: Routes = [
     ],
   },
   {
+    path: 'angular/component-lifecycle',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/angular/component-lifecycle/theory.md' },
+      },
+    ],
+  },
+  {
     path: 'angular/forms',
     children: [
       {
@@ -67,6 +77,16 @@ const routes: Routes = [
     ],
   },
   {
+    path: 'angular/dependency-injection',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/angular/dependency-injection/theory.md' },
+      },
+    ],
+  },
+  {
     path: 'system-design/data-storage-strategy',
     children: [
       {
@@ -77,12 +97,71 @@ const routes: Routes = [
     ],
   },
   {
+    path: 'system-design/cache',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/system-design/cache/theory.md' },
+      },
+    ],
+  },
+  {
+    path: 'system-design/load-parameter',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/system-design/load-parameter/theory.md' },
+      },
+    ],
+  },
+  {
+    path: 'system-design/case-studies',
+    children: [
+      {
+        path: 'cache-refresh-multi-source',
+        component: MarkdownDocComponent,
+        data: {
+          docSrc: 'assets/docs/system-design/case-studies/cache-refresh-multi-source.md',
+        },
+      },
+      {
+        path: 'clinic-queue-current-load',
+        component: MarkdownDocComponent,
+        data: {
+          docSrc: 'assets/docs/system-design/case-studies/clinic-queue-current-load.md',
+        },
+      },
+    ],
+  },
+  {
     path: 'design-patterns',
     children: [
       {
         path: 'foundation',
         component: MarkdownDocComponent,
         data: { docSrc: 'assets/docs/design-patterns/foundation.md' },
+      },
+      {
+        path: 'creational',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/design-patterns/creational.md' },
+      },
+      {
+        path: 'structural',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/design-patterns/structural.md' },
+      },
+      {
+        path: 'behavioral',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/design-patterns/behavioral.md' },
+      },
+      {
+        path: 'case-studies/payment-provider-selection',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/design-patterns/case-studies/payment-provider-selection.md' },
       },
     ],
   },
@@ -136,6 +215,20 @@ const routes: Routes = [
           docSrc: 'assets/docs/frontend-engineering/case-studies/01-order-list-production.md',
         },
       },
+      {
+        path: 'case-multi-step-form-production',
+        component: MarkdownDocComponent,
+        data: {
+          docSrc: 'assets/docs/frontend-engineering/case-studies/02-multi-step-form-production.md',
+        },
+      },
+      {
+        path: 'case-unsaved-changes-detection',
+        component: MarkdownDocComponent,
+        data: {
+          docSrc: 'assets/docs/frontend-engineering/case-studies/03-unsaved-changes-detection.md',
+        },
+      },
     ],
   },
   {
@@ -146,10 +239,21 @@ const routes: Routes = [
         component: MarkdownDocComponent,
         data: { docSrc: 'assets/docs/backend-engineering/code-like-senior.md' },
       },
+      
+      {
+        path: 'review-code-middle-senior',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/backend-engineering/review-code-middle-senior.md' },
+      },
       {
         path: 'architecture-layering',
         component: MarkdownDocComponent,
         data: { docSrc: 'assets/docs/backend-engineering/02-architecture-layering.md' },
+      },
+      {
+        path: 'system-design-thinking',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/backend-engineering/03-system-design-thinking.md' },
       },
     ],
   },

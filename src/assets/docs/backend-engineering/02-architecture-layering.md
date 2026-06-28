@@ -1,6 +1,6 @@
-# 02. Architecture & Layering
+# Architecture & Layering
 
-Bài này trả lời câu hỏi rất thực tế: **một đoạn code backend nên đặt ở đâu?**
+Tài liệu này trả lời câu hỏi rất thực tế: **một đoạn code backend nên đặt ở đâu?**
 
 Khi codebase nhỏ, đặt logic ở đâu cũng có vẻ chạy được. Khi codebase lớn lên, việc đặt sai lớp làm business rule bị duplicate, service method phình to, API khó đổi, query khó tối ưu và bug dữ liệu xuất hiện ở những chỗ rất khó đoán.
 
@@ -535,7 +535,7 @@ DTO:
 
 ---
 
-## 16. Tóm tắt bài 02
+## 16. Tóm tắt
 
 Layering tốt không phải là nhiều lớp. Layering tốt là:
 

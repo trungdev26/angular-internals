@@ -28,6 +28,10 @@ import {
   ShareAltOutline,
   ApiOutline,
   GlobalOutline,
+  ExperimentOutline,
+  LineChartOutline,
+  DeploymentUnitOutline,
+  SyncOutline,
 } from '@ant-design/icons-angular/icons';
 import { NzImageModule } from 'ng-zorro-antd/image';
 import { NzInputNumberModule } from 'ng-zorro-antd/input-number';
@@ -79,6 +83,10 @@ registerLocaleData(en);
       ShareAltOutline,
       ApiOutline,
       GlobalOutline,
+      ExperimentOutline,
+      LineChartOutline,
+      DeploymentUnitOutline,
+      SyncOutline,
     ]),
     NzImageModule,
     NzInputNumberModule,

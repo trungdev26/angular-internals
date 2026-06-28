@@ -1,364 +1,713 @@
-# Design Patterns trong .NET Core - Nền tảng tư duy thiết kế
+# Design Patterns - Nền tảng tư duy thiết kế
 
-Design Pattern không phải là bộ công thức để "nhét vào code cho sang". Pattern là cách đặt tên cho những lời giải đã được kiểm chứng khi code bắt đầu gặp các vấn đề lặp lại: logic bị copy nhiều nơi, class phụ thuộc chặt vào nhau, thay đổi một yêu cầu nhỏ làm vỡ nhiều module, test khó, deploy khó, hoặc business logic bị trộn với infrastructure.
+Design Patterns là công cụ để tổ chức code khi hệ thống bắt đầu có biến thể, dependency, workflow, state hoặc rule nghiệp vụ phức tạp. Giá trị của pattern nằm ở khả năng làm rõ boundary, giảm coupling, tăng testability và kiểm soát rủi ro thay đổi.
 
-Với định hướng middle/senior, mục tiêu không phải là nhớ thật nhiều tên pattern. Mục tiêu là nhìn được **lực kéo thiết kế** trong một bài toán: chỗ nào đang thay đổi thường xuyên, chỗ nào cần ổn định, chỗ nào nên trừu tượng hóa, chỗ nào nên giữ đơn giản.
+Trong hệ thống .NET Core, pattern thường xuất hiện quanh các điểm như Dependency Injection, Options, external provider, data access, transaction, background job, event, cache, middleware pipeline và workflow nghiệp vụ. Mỗi pattern đều đi kèm chi phí: thêm abstraction, thêm class, thêm indirection và thêm độ khó khi trace runtime.
+
+Phần nền tảng này tập trung vào cách đánh giá một thiết kế trước khi áp dụng pattern: input cần thu thập, điểm thay đổi, dependency kỹ thuật, lifecycle, transaction boundary, observability, trade-off và tiêu chí review.
 
 ---
 
-## 1. Pattern giải quyết vấn đề gì?
+## 1. Mục tiêu của tài liệu
 
-Một pattern tốt thường giải quyết một hoặc nhiều vấn đề sau:
+Sau phần này, người đọc cần làm được ba việc:
 
-- **Giảm coupling**: module này không cần biết quá nhiều chi tiết của module khác.
-- **Tăng cohesion**: một class/module tập trung vào một trách nhiệm rõ ràng.
-- **Cô lập thay đổi**: khi business thay đổi, chỉ một vùng code nhỏ cần sửa.
-- **Tăng khả năng test**: business logic có thể test mà không cần database, HTTP, file system hoặc service thật.
-- **Tái sử dụng đúng chỗ**: reuse hành vi ổn định, không ép reuse các use case khác bản chất.
-- **Làm code có ngôn ngữ chung**: khi nói "Strategy", "Repository", "Decorator", team hiểu cùng một kiểu cấu trúc.
+1. Phân tích một yêu cầu trước khi chọn pattern.
+2. Đánh giá một design theo input, biến thể, dependency, lifecycle, testability và rủi ro thay đổi.
+3. Nhận diện khi nào pattern giúp hệ thống tốt hơn và khi nào pattern chỉ tạo thêm complexity.
 
-Ví dụ trong .NET Core:
+Kết quả mong muốn không phải là "biết nhiều pattern", mà là biết đặt câu hỏi đúng khi thiết kế.
+
+---
+
+## 2. Design Pattern là gì trong thực tế dự án?
+
+Design Pattern là một cách tổ chức code đã được đặt tên để giải quyết một nhóm vấn đề lặp lại.
+
+Trong dự án thực tế, pattern thường xuất hiện khi hệ thống có một trong các áp lực sau:
+
+| Áp lực thiết kế | Biểu hiện trong code | Pattern thường liên quan |
+|---|---|---|
+| Nhiều biến thể nghiệp vụ | `if/else`, `switch` tăng theo loại nghiệp vụ | Strategy, Factory |
+| Tích hợp provider bên ngoài | Business code gọi trực tiếp SDK/API | Adapter, Facade |
+| Cross-cutting concern | Logging/cache/retry/validation rải rác | Decorator, Pipeline |
+| Workflow nhiều bước | Controller/service điều phối quá nhiều dependency | Facade, Command, Mediator |
+| State phức tạp | Rule phụ thuộc trạng thái hiện tại | State |
+| Data access/query phức tạp | Query lặp lại, rule filter rải rác | Specification, Query Object |
+| Consistency giữa DB và message | Commit DB xong cần publish event an toàn | Outbox |
+
+Pattern không thay thế tư duy thiết kế. Pattern chỉ là công cụ sau khi đã hiểu vấn đề.
+
+---
+
+## 3. Khung phân tích trước khi chọn pattern
+
+Một design nên được phân tích theo bảy nhóm input.
+
+### 3.1 Business Input
+
+Xác định use case và luật nghiệp vụ.
+
+| Câu hỏi | Mục đích |
+|---|---|
+| Use case chính là gì? | Xác định flow cần bảo vệ |
+| Actor là ai? | User, system, background job, external service |
+| Dữ liệu đầu vào gồm gì? | Request, command, file, event, message |
+| Kết quả nghiệp vụ là gì? | Entity thay đổi, file sinh ra, event phát đi |
+| Rule nào quan trọng nhất? | Rule sai sẽ gây lỗi nghiệp vụ |
+
+Ví dụ:
+
+```text
+Use case:
+  CreateOrder
+
+Input:
+  CustomerId
+  Items
+  ShippingMethod
+  PaymentProvider
+  Language
+
+Output:
+  Order được tạo
+  Stock được giữ/trừ
+  Payment được khởi tạo
+  Email xác nhận được gửi
+```
+
+### 3.2 Change Points
+
+Change point là phần có khả năng thay đổi theo thời gian.
+
+| Change point | Ví dụ | Rủi ro nếu hard-code |
+|---|---|---|
+| Rule | Discount theo customer type | Sửa rule làm vỡ service chính |
+| Provider | VNPay, Momo, Stripe | Đổi provider phải sửa nhiều nơi |
+| Format | PDF, Excel, XML | Export service phình to |
+| Channel | Email, SMS, Push | Notification bị nhân class |
+| Tenant | Mỗi tenant cấu hình khác | Logic trộn config nhiều nơi |
+| State | Draft, Confirmed, Paid, Cancelled | `if/else` theo status rải rác |
+
+Senior không abstraction mọi thứ. Senior tìm đúng phần **thay đổi đủ nhiều** để đáng tách.
+
+### 3.3 Technical Dependency
+
+Liệt kê dependency kỹ thuật mà use case phải chạm tới.
+
+| Dependency | Câu hỏi đánh giá |
+|---|---|
+| Database | Có transaction boundary không? Query có phức tạp không? |
+| Cache | Cache là tối ưu hay source of truth? TTL/invalidation thế nào? |
+| External API | Timeout/retry/idempotency/fallback thế nào? |
+| Queue/Event bus | Message có cần outbox không? Handler có idempotent không? |
+| File storage | File có cần audit, permission, retention không? |
+| Email/SMS | Lỗi gửi có làm fail transaction chính không? |
+
+Dependency càng không ổn định hoặc càng xa business core, càng nên được bọc sau boundary rõ.
+
+### 3.4 Runtime Parameters
+
+Nhiều design sai vì không phân biệt rõ parameter nào được load ở đâu.
+
+| Parameter | Nơi load | Ví dụ |
+|---|---|---|
+| Static config | `appsettings.json`, environment variable | Default payment provider |
+| Runtime config | Database/config service/cache | Tenant setting, feature flag |
+| Request input | Body/query/header | Export format, shipping method |
+| User context | Claims/session/current user | Branch, role, language |
+| System context | Time, environment, correlation id | Retry policy, audit trace |
+
+Ví dụ `appsettings.json`:
+
+```json
+{
+  "Payment": {
+    "DefaultProvider": "vnpay",
+    "Providers": {
+      "vnpay": {
+        "BaseUrl": "https://sandbox.vnpay.vn",
+        "MerchantCode": "demo"
+      },
+      "momo": {
+        "BaseUrl": "https://test-payment.momo.vn",
+        "PartnerCode": "demo"
+      }
+    }
+  }
+}
+```
+
+Options class:
 
 ```csharp
-public class OrderService
+public class PaymentOptions
 {
-    private readonly SqlConnection _connection;
-    private readonly EmailClient _emailClient;
+    public string DefaultProvider { get; set; } = string.Empty;
+    public Dictionary<string, PaymentProviderOptions> Providers { get; set; } = new();
+}
 
-    public OrderService()
+public class PaymentProviderOptions
+{
+    public string BaseUrl { get; set; } = string.Empty;
+    public string MerchantCode { get; set; } = string.Empty;
+    public string PartnerCode { get; set; } = string.Empty;
+}
+```
+
+Đăng ký:
+
+```csharp
+services.Configure<PaymentOptions>(
+    configuration.GetSection("Payment"));
+```
+
+Điểm đánh giá:
+
+```text
+Nếu provider được quyết định bởi config/request/tenant,
+thì code không nên hard-code provider cụ thể trong use case chính.
+```
+
+Một thiết kế hợp lý thường tách:
+
+- Chỗ đọc parameter.
+- Chỗ validate parameter.
+- Chỗ chọn implementation.
+- Chỗ chạy nghiệp vụ.
+
+### 3.5 Lifecycle
+
+Trong .NET Core, lifecycle là phần rất quan trọng khi đánh giá design.
+
+| Lifetime | Dùng cho | Tránh dùng cho |
+|---|---|---|
+| Singleton | Stateless service, immutable config, thread-safe cache client | Service giữ state theo request/user |
+| Scoped | DbContext, Unit of Work, repository theo request | Object cần sống toàn app |
+| Transient | Lightweight service, handler ngắn hạn | Object tạo rất tốn chi phí |
+
+Sai lifecycle có thể làm design đúng về mặt pattern nhưng lỗi runtime.
+
+Ví dụ lỗi phổ biến:
+
+```text
+Singleton service inject Scoped DbContext.
+```
+
+Vấn đề:
+
+- DbContext sống theo request.
+- Singleton sống toàn app.
+- Singleton giữ scoped dependency quá lâu.
+- Có thể gây lỗi runtime hoặc sai dữ liệu.
+
+Senior đánh giá pattern luôn đi kèm lifecycle, không chỉ nhìn sơ đồ class.
+
+### 3.6 Transaction and Consistency Boundary
+
+Một use case cần xác định phần nào phải thành công cùng nhau.
+
+Ví dụ `CreateOrder`:
+
+```text
+Trong transaction:
+  - Tạo order
+  - Tạo order items
+  - Trừ/giữ tồn kho
+
+Ngoài transaction hoặc sau commit:
+  - Gửi email
+  - Publish integration event
+  - Ghi analytics
+```
+
+Nếu gửi email nằm trong transaction DB, transaction có thể bị giữ lâu. Nếu publish event trực tiếp sau commit nhưng app crash giữa chừng, event có thể mất. Khi đó pattern như Outbox bắt đầu có ý nghĩa.
+
+Đánh giá senior:
+
+| Câu hỏi | Ý nghĩa |
+|---|---|
+| Operation nào phải atomic? | Xác định transaction boundary |
+| Side effect nào có thể async? | Tách khỏi flow chính |
+| Nếu app crash giữa flow thì sao? | Cần outbox/retry/recovery không |
+| Handler chạy lại có an toàn không? | Cần idempotency không |
+
+### 3.7 Observability and Debuggability
+
+Design tốt phải vận hành được trong production.
+
+Một pattern làm code đẹp nhưng khó trace lỗi production thì chưa chắc tốt.
+
+Cần đánh giá:
+
+- Log có correlation id không?
+- Có biết request đi qua handler/decorator/pipeline nào không?
+- Event handler fail có được monitor không?
+- Retry có log số lần thử không?
+- Cache hit/miss có metric không?
+- Background job fail có retry/dead-letter không?
+
+Senior không chỉ thiết kế flow chạy đúng khi mọi thứ ổn. Senior thiết kế cả lúc dependency chậm, event fail, cache miss, API timeout, hoặc dữ liệu không đồng bộ.
+
+---
+
+## 4. Ma trận đánh giá có nên dùng pattern không
+
+Không nên chọn pattern theo cảm giác. Có thể đánh giá bằng ma trận sau.
+
+| Tiêu chí | Điểm thấp | Điểm cao |
+|---|---|---|
+| Số lượng biến thể | 1-2 case đơn giản | Nhiều case, tiếp tục tăng |
+| Tần suất thay đổi | Hiếm khi đổi | Đổi theo sprint/khách hàng/tenant |
+| Rủi ro sai | Sai ít ảnh hưởng | Sai ảnh hưởng tiền, quyền, dữ liệu |
+| Testability | Test chung là đủ | Cần test riêng từng rule/provider |
+| Dependency volatility | Dependency ổn định | Provider/API/config thay đổi |
+| Reuse need | Chỉ dùng một nơi | Dùng nhiều use case/module |
+| Operational risk | Không có side effect lớn | Có retry, timeout, consistency, audit |
+
+Quy tắc đọc ma trận:
+
+```text
+Điểm thấp ở hầu hết tiêu chí
+  -> Giữ code trực tiếp, tránh pattern sớm.
+
+Điểm cao ở biến thể + thay đổi + testability
+  -> Cân nhắc Strategy/Factory.
+
+Điểm cao ở dependency volatility
+  -> Cân nhắc Adapter/Facade.
+
+Điểm cao ở side effect/consistency
+  -> Cân nhắc Command/Event/Outbox/Idempotency.
+```
+
+---
+
+## 5. Ví dụ phân tích: chọn payment provider
+
+### 5.1 Requirement
+
+```text
+Hệ thống hỗ trợ thanh toán qua VNPay và Momo.
+Mỗi tenant có thể chọn provider mặc định.
+Một số request có thể override provider.
+Sau này có thể thêm Stripe.
+```
+
+### 5.2 Input analysis
+
+| Nhóm | Phân tích |
+|---|---|
+| Use case | Tạo payment request |
+| Input | OrderId, Amount, Provider optional |
+| Config | Tenant default provider |
+| Change point | Provider có thể tăng |
+| Dependency | SDK/API từng provider khác nhau |
+| Risk | Sai provider/sai amount ảnh hưởng tiền |
+| Test need | Cần test từng provider độc lập |
+
+### 5.3 Design forces
+
+| Force | Hướng thiết kế |
+|---|---|
+| Provider thay đổi | Không hard-code trong service chính |
+| SDK khác nhau | Bọc bằng Adapter |
+| Chọn provider theo runtime parameter | Dùng Factory |
+| Payment là nghiệp vụ rủi ro cao | Contract rõ, test riêng, log/audit đầy đủ |
+
+### 5.4 Candidate design
+
+```csharp
+public interface IPaymentGateway
+{
+    string Provider { get; }
+    Task<PaymentResult> ChargeAsync(
+        PaymentRequest request,
+        CancellationToken cancellationToken);
+}
+```
+
+Adapter cho provider:
+
+```csharp
+public class VNPayGatewayAdapter : IPaymentGateway
+{
+    private readonly VNPayClient _client;
+
+    public VNPayGatewayAdapter(VNPayClient client)
     {
-        _connection = new SqlConnection("...");
-        _emailClient = new EmailClient("...");
+        _client = client;
+    }
+
+    public string Provider => "vnpay";
+
+    public Task<PaymentResult> ChargeAsync(
+        PaymentRequest request,
+        CancellationToken cancellationToken)
+    {
+        // Map PaymentRequest -> VNPay request
+        // Call VNPay
+        // Map VNPay response -> PaymentResult
+        return Task.FromResult(new PaymentResult());
     }
 }
 ```
 
-Code trên chạy được, nhưng thiết kế có vấn đề:
-
-- `OrderService` tự tạo dependency, rất khó test.
-- Business logic bị dính với SQL và email infrastructure.
-- Muốn đổi email provider hoặc database connection phải sửa trực tiếp service.
-
-Một hướng thiết kế tốt hơn là đảo ngược dependency:
+Factory chọn provider:
 
 ```csharp
-public interface IOrderRepository
+public interface IPaymentGatewayFactory
 {
-    Task<Order?> GetAsync(Guid id, CancellationToken cancellationToken);
-    Task SaveAsync(Order order, CancellationToken cancellationToken);
+    IPaymentGateway Create(string provider);
 }
 
-public interface IEmailSender
+public class PaymentGatewayFactory : IPaymentGatewayFactory
 {
-    Task SendAsync(EmailMessage message, CancellationToken cancellationToken);
-}
+    private readonly IReadOnlyDictionary<string, IPaymentGateway> _gateways;
 
-public class OrderService
-{
-    private readonly IOrderRepository _orders;
-    private readonly IEmailSender _emailSender;
-
-    public OrderService(IOrderRepository orders, IEmailSender emailSender)
+    public PaymentGatewayFactory(IEnumerable<IPaymentGateway> gateways)
     {
-        _orders = orders;
-        _emailSender = emailSender;
+        _gateways = gateways.ToDictionary(
+            gateway => gateway.Provider,
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    public IPaymentGateway Create(string provider)
+    {
+        if (!_gateways.TryGetValue(provider, out var gateway))
+        {
+            throw new NotSupportedException($"Payment provider '{provider}' is not supported.");
+        }
+
+        return gateway;
     }
 }
 ```
 
-Đây chưa cần gọi tên là pattern gì vội. Nhưng tư duy phía sau đã là nền tảng của nhiều pattern: Dependency Injection, Repository, Adapter, Strategy, Clean Architecture.
+Use case:
+
+```csharp
+public class PaymentService
+{
+    private readonly IPaymentGatewayFactory _factory;
+    private readonly ITenantPaymentSettingReader _tenantSettings;
+
+    public PaymentService(
+        IPaymentGatewayFactory factory,
+        ITenantPaymentSettingReader tenantSettings)
+    {
+        _factory = factory;
+        _tenantSettings = tenantSettings;
+    }
+
+    public async Task<PaymentResult> PayAsync(
+        PaymentCommand command,
+        CancellationToken cancellationToken)
+    {
+        var provider = string.IsNullOrWhiteSpace(command.Provider)
+            ? await _tenantSettings.GetDefaultProviderAsync(command.TenantId, cancellationToken)
+            : command.Provider;
+
+        var gateway = _factory.Create(provider);
+
+        return await gateway.ChargeAsync(command.ToPaymentRequest(), cancellationToken);
+    }
+}
+```
+
+### 5.5 Senior review
+
+| Tiêu chí | Đánh giá |
+|---|---|
+| Boundary | `PaymentService` không biết SDK cụ thể |
+| Extensibility | Thêm Stripe bằng cách thêm adapter mới |
+| Testability | Test factory, từng adapter, và use case riêng |
+| Risk | Cần audit log, idempotency key, timeout, retry policy |
+| Complexity | Factory + Adapter là hợp lý vì provider có biến thể thật |
+| Missing concern | Cần đánh giá Outbox nếu payment result phát event sau commit |
+
+Kết luận:
+
+```text
+Factory + Adapter phù hợp.
+Không nên dùng Abstract Factory nếu hiện tại mỗi provider chỉ cần một gateway.
+Không nên dùng Mediator chỉ để gọi PaymentService nếu chưa có pipeline concern rõ.
+```
 
 ---
 
-## 2. Nguyên tắc trước, pattern sau
+## 6. Ví dụ phân tích: discount rule
 
-Pattern là biểu hiện cụ thể. Nguyên tắc thiết kế mới là gốc.
+### 6.1 Requirement
 
-Nếu chưa hiểu nguyên tắc, rất dễ dùng pattern sai: thấy database là tạo Repository, thấy nhiều `if` là tạo Strategy, thấy nhiều service là tạo Mediator, thấy hệ thống lớn là nhảy vào CQRS. Senior không chọn pattern vì tên nghe chuyên nghiệp, mà vì nó giải quyết đúng áp lực hiện tại của hệ thống.
+```text
+Tính giảm giá theo loại khách hàng.
+Hiện có Standard, Gold, VIP.
+Marketing thường xuyên thay đổi rule.
+```
+
+### 6.2 Thiết kế trực tiếp
+
+```csharp
+public decimal CalculateDiscount(Customer customer, Order order)
+{
+    if (customer.Type == "standard")
+    {
+        return order.TotalAmount * 0.02m;
+    }
+
+    if (customer.Type == "gold")
+    {
+        return order.TotalAmount * 0.05m;
+    }
+
+    if (customer.Type == "vip")
+    {
+        return order.TotalAmount * 0.1m;
+    }
+
+    return 0;
+}
+```
+
+Thiết kế này có thể chấp nhận nếu:
+
+- Rule đơn giản.
+- Ít thay đổi.
+- Chỉ dùng một nơi.
+- Không cần test riêng từng rule.
+
+### 6.3 Khi nào Strategy đáng dùng?
+
+Strategy đáng dùng khi rule phát triển thành:
+
+```text
+Gold:
+  - Giảm 5%
+  - Tối đa 500.000
+  - Không áp dụng cho hàng khuyến mãi
+
+VIP:
+  - Giảm 10%
+  - Miễn phí vận chuyển
+  - Thêm voucher sinh nhật
+  - Có rule riêng theo campaign
+```
+
+Lúc này, từng rule có lifecycle riêng và test riêng.
+
+Candidate design:
+
+```csharp
+public interface IDiscountRule
+{
+    string CustomerType { get; }
+    DiscountResult Calculate(Customer customer, Order order);
+}
+```
+
+```csharp
+public class VipDiscountRule : IDiscountRule
+{
+    public string CustomerType => "vip";
+
+    public DiscountResult Calculate(Customer customer, Order order)
+    {
+        var amount = order.TotalAmount * 0.1m;
+        return new DiscountResult(amount, "VIP discount");
+    }
+}
+```
+
+Resolver:
+
+```csharp
+public class DiscountCalculator
+{
+    private readonly IReadOnlyDictionary<string, IDiscountRule> _rules;
+
+    public DiscountCalculator(IEnumerable<IDiscountRule> rules)
+    {
+        _rules = rules.ToDictionary(
+            rule => rule.CustomerType,
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    public DiscountResult Calculate(Customer customer, Order order)
+    {
+        if (!_rules.TryGetValue(customer.Type, out var rule))
+        {
+            return DiscountResult.None();
+        }
+
+        return rule.Calculate(customer, order);
+    }
+}
+```
+
+### 6.4 Senior review
+
+| Tiêu chí | Đánh giá |
+|---|---|
+| Có biến thể thật không? | Có, theo customer type |
+| Biến thể có thay đổi riêng không? | Có, marketing đổi rule |
+| Test riêng có giá trị không? | Có |
+| Thêm class có đáng không? | Đáng nếu rule đủ phức tạp |
+| Có thể over-engineering không? | Có, nếu rule chỉ là 2 dòng và không đổi |
+
+Kết luận:
+
+```text
+Strategy phù hợp khi rule bắt đầu phức tạp hoặc thay đổi thường xuyên.
+Nếu rule còn nhỏ, giữ if/switch có thể tốt hơn.
+```
 
 ---
 
-## 3. SOLID trong thực tế .NET Core
+## 7. Nguyên tắc thiết kế nền tảng
 
-### 3.1 Single Responsibility Principle
+### 7.1 Single Responsibility Principle
 
-Một class nên có một lý do chính để thay đổi.
+Một module nên có một lý do chính để thay đổi.
 
-Sai lầm phổ biến là hiểu SRP thành "mỗi class chỉ có một method". Không phải. SRP nói về **lý do thay đổi**, không nói về số dòng code.
+Đánh giá theo lý do thay đổi, không đánh giá theo số dòng code.
 
-Ví dụ service vừa xử lý nghiệp vụ, vừa format PDF, vừa gửi email, vừa ghi audit log:
+Ví dụ service vừa approve invoice, vừa render PDF, vừa gửi email, vừa ghi audit:
 
 ```csharp
 public class InvoiceService
 {
-    public Task ApproveInvoiceAsync(Guid invoiceId)
+    public Task ApproveAsync(Guid invoiceId)
     {
         // Validate invoice
         // Update status
-        // Generate PDF
+        // Render PDF
         // Send email
         // Write audit log
+        return Task.CompletedTask;
     }
 }
 ```
 
-Ở mức nhỏ có thể chấp nhận. Nhưng khi logic phình ra, nên tách trách nhiệm:
+Phân tích:
 
-- `InvoiceService`: điều phối use case nghiệp vụ.
-- `IInvoiceRepository`: đọc/ghi invoice.
-- `IPdfRenderer`: tạo file PDF.
-- `IEmailSender`: gửi email.
-- `IAuditLogger`: ghi log nghiệp vụ.
+| Trách nhiệm | Lý do thay đổi |
+|---|---|
+| Validate invoice | Rule nghiệp vụ đổi |
+| Update status | Workflow đổi |
+| Render PDF | Template/report đổi |
+| Send email | Provider/template đổi |
+| Audit log | Compliance đổi |
 
-Tách không phải để "đẹp", mà để khi format PDF đổi, không làm rủi ro logic approve invoice.
+Nếu các phần này bắt đầu thay đổi độc lập, nên tách trách nhiệm.
 
-### 3.2 Open/Closed Principle
+### 7.2 Open/Closed Principle
 
 Code nên mở cho mở rộng, đóng với sửa đổi.
 
-Ví dụ tính phí vận chuyển theo nhiều phương thức:
+Không có nghĩa là mọi nơi đều phải interface. Chỉ những điểm có biến thể thật và thay đổi thường xuyên mới cần mở rộng.
+
+### 7.3 Liskov Substitution Principle
+
+Class con/implementation phải giữ đúng contract.
+
+Nếu implementation phải throw vì không hỗ trợ hành vi của interface, interface có thể đang quá rộng hoặc abstraction sai.
+
+### 7.4 Interface Segregation Principle
+
+Không bắt caller phụ thuộc vào method nó không dùng.
+
+Interface quá rộng thường tạo coupling ẩn. Nhưng tách quá nhỏ cũng tạo nhiều file không cần thiết. Cần tách theo nhóm client/use case thật.
+
+### 7.5 Dependency Inversion Principle
+
+Module cấp cao phụ thuộc vào abstraction, không phụ thuộc trực tiếp infrastructure.
+
+Trong .NET Core, nguyên tắc này thường đi cùng DI:
 
 ```csharp
-public decimal CalculateShipping(Order order, string method)
-{
-    if (method == "standard") return 30000;
-    if (method == "express") return 60000;
-    if (method == "same-day") return 120000;
-
-    throw new NotSupportedException();
-}
-```
-
-Khi business thêm phương thức mới, method này bị sửa liên tục. Nếu rule phức tạp và thay đổi thường xuyên, có thể dùng Strategy:
-
-```csharp
-public interface IShippingFeeCalculator
-{
-    string Method { get; }
-    decimal Calculate(Order order);
-}
-
-public class ExpressShippingFeeCalculator : IShippingFeeCalculator
-{
-    public string Method => "express";
-
-    public decimal Calculate(Order order)
-    {
-        return order.TotalAmount > 1_000_000 ? 0 : 60000;
-    }
-}
-```
-
-Use case chính chỉ chọn strategy phù hợp:
-
-```csharp
-public class ShippingService
-{
-    private readonly IReadOnlyDictionary<string, IShippingFeeCalculator> _calculators;
-
-    public ShippingService(IEnumerable<IShippingFeeCalculator> calculators)
-    {
-        _calculators = calculators.ToDictionary(x => x.Method);
-    }
-
-    public decimal Calculate(Order order, string method)
-    {
-        if (!_calculators.TryGetValue(method, out var calculator))
-        {
-            throw new NotSupportedException($"Shipping method '{method}' is not supported.");
-        }
-
-        return calculator.Calculate(order);
-    }
-}
-```
-
-Nhưng lưu ý: nếu chỉ có 2 case đơn giản và ít thay đổi, `if` rõ ràng vẫn tốt hơn tạo 5 class.
-
-### 3.3 Liskov Substitution Principle
-
-Class con phải thay thế được class cha mà không làm hỏng kỳ vọng của caller.
-
-Ví dụ sai:
-
-```csharp
-public abstract class ReportExporter
-{
-    public abstract byte[] Export(ReportData data);
-}
-
-public class EmailReportExporter : ReportExporter
-{
-    public override byte[] Export(ReportData data)
-    {
-        throw new NotSupportedException("Email exporter does not return bytes.");
-    }
-}
-```
-
-Nếu class con phải throw vì không làm được contract của class cha, abstraction đang sai. Nên tách interface theo hành vi thật:
-
-```csharp
-public interface IFileReportExporter
-{
-    byte[] Export(ReportData data);
-}
-
-public interface IReportSender
-{
-    Task SendAsync(ReportData data, CancellationToken cancellationToken);
-}
-```
-
-### 3.4 Interface Segregation Principle
-
-Không bắt client phụ thuộc vào những method nó không dùng.
-
-Ví dụ interface quá to:
-
-```csharp
-public interface IUserService
-{
-    Task<User> GetAsync(Guid id);
-    Task CreateAsync(User user);
-    Task DeleteAsync(Guid id);
-    Task ResetPasswordAsync(Guid id);
-    Task ExportUsersAsync();
-    Task ImportUsersAsync(Stream file);
-}
-```
-
-Các consumer chỉ cần đọc user nhưng vẫn bị kéo theo toàn bộ contract. Có thể tách:
-
-- `IUserReader`
-- `IUserWriter`
-- `IUserPasswordService`
-- `IUserImportExportService`
-
-Không cần tách cực đoan ngay từ đầu. Tách khi interface bắt đầu phục vụ nhiều nhóm client khác nhau.
-
-### 3.5 Dependency Inversion Principle
-
-Module cấp cao không nên phụ thuộc trực tiếp vào module cấp thấp. Cả hai nên phụ thuộc vào abstraction.
-
-Trong .NET Core, nguyên tắc này đi cùng DI container:
-
-```csharp
-services.AddScoped<IOrderRepository, EfCoreOrderRepository>();
+services.AddScoped<IPaymentGateway, VNPayGatewayAdapter>();
 services.AddScoped<IEmailSender, SendGridEmailSender>();
-services.AddScoped<OrderService>();
 ```
 
-`OrderService` không biết repository dùng EF Core, Dapper, HTTP API hay fake in-memory trong test. Nó chỉ biết contract nghiệp vụ cần dùng.
+Tuy nhiên, không phải interface nào cũng có giá trị. Interface tốt thường nằm ở boundary có lý do thay đổi hoặc cần test.
 
 ---
 
-## 4. DRY, KISS, YAGNI - ba nguyên tắc dễ hiểu sai
+## 8. DRY, KISS, YAGNI ở mức senior
 
-### 4.1 DRY không phải là gom mọi đoạn code giống nhau
+### 8.1 DRY
 
-DRY là "Don't Repeat Yourself", nhưng cái cần tránh lặp là **knowledge**, không phải mọi đoạn text giống nhau.
+DRY tránh lặp knowledge, không phải tránh mọi đoạn code giống nhau.
 
-Hai đoạn code giống nhau về hình dạng nhưng khác lý do thay đổi thì không nên gom.
+| Tình huống | Quyết định |
+|---|---|
+| Code giống nhau và cùng lý do thay đổi | Có thể abstraction |
+| Code giống nhau nhưng khác nghiệp vụ | Chấp nhận duplicate |
+| Chưa rõ lý do thay đổi | Chờ thêm tín hiệu |
 
-Ví dụ:
+### 8.2 KISS
 
-- Validate `Customer.PhoneNumber`
-- Validate `Supplier.PhoneNumber`
+KISS là giữ thiết kế đơn giản nhưng vẫn đúng boundary.
 
-Ban đầu cả hai cùng là 10 số. Nhưng nếu sau này supplier cho phép số quốc tế, còn customer chỉ cho số nội địa, việc gom chung từ sớm sẽ tạo coupling sai.
+Code dồn tất cả vào một service lớn không phải KISS. Đó là đơn giản bề mặt nhưng phức tạp khi bảo trì.
 
-Quy tắc middle/senior:
+### 8.3 YAGNI
 
-```text
-Trùng code + cùng lý do thay đổi       -> cân nhắc abstraction
-Trùng code + khác lý do thay đổi       -> chấp nhận duplicate tạm thời
-Chưa rõ lý do thay đổi có giống không  -> đợi thêm tín hiệu
-```
-
-### 4.2 KISS không có nghĩa là code sơ sài
-
-KISS là giữ thiết kế đơn giản nhất có thể, nhưng vẫn đủ đúng cho bài toán.
-
-Code đơn giản tốt:
-
-- Dễ đọc.
-- Ít tầng gián tiếp.
-- Ít magic.
-- Dependency rõ.
-- Test được.
-
-Code "đơn giản giả":
-
-- Dồn hết vào một service 1000 dòng.
-- Không tách transaction boundary.
-- Không có validation rõ.
-- Hard-code provider, connection string, file path.
-- Khó test vì mọi thứ trộn vào nhau.
-
-### 4.3 YAGNI không có nghĩa là không thiết kế
-
-YAGNI là "You Aren't Gonna Need It": đừng xây tính năng/abstraction khi chưa có nhu cầu thật.
-
-Nhưng YAGNI không cấm mình thiết kế điểm mở rộng hợp lý. Nó nhắc mình không nên đoán quá xa.
+YAGNI không có nghĩa là không thiết kế. Nó có nghĩa là không xây abstraction cho một tương lai chưa có tín hiệu.
 
 Ví dụ:
 
-- Chưa cần microservices chỉ vì "sau này scale".
-- Chưa cần CQRS nếu CRUD hiện tại rõ ràng và không có áp lực read/write khác nhau.
-- Chưa cần generic repository nếu EF Core `DbContext` đã đủ express query rõ.
-- Chưa cần event sourcing nếu nghiệp vụ không cần replay toàn bộ lịch sử state.
+| Quyết định | Đánh giá |
+|---|---|
+| Chưa dùng CQRS cho CRUD đơn giản | Hợp lý |
+| Chưa tách microservices khi chưa có boundary/scale rõ | Hợp lý |
+| Không hard-code payment provider dù hiện mới có VNPay | Có thể hợp lý nếu roadmap đã có provider khác |
+| Tạo 20 interface cho app nhỏ chưa có biến thể | Có thể over-engineering |
 
 ---
 
-## 5. Coupling và Cohesion
+## 9. Coupling và Cohesion
 
-### 5.1 Coupling
+### 9.1 Coupling
 
-Coupling là mức độ một phần code biết/phụ thuộc vào phần khác.
+Coupling cao khi một module biết quá nhiều chi tiết của module khác.
 
-Coupling cao thường có dấu hiệu:
+Dấu hiệu:
 
-- Service A new trực tiếp Service B.
-- Business logic gọi trực tiếp `HttpClient`, `SqlConnection`, file system.
-- Một thay đổi nhỏ ở module B làm nhiều module khác phải sửa.
-- Test một method phải dựng cả database, cache, queue, email.
+- Business service tự tạo `SqlConnection`, `HttpClient`, SDK client.
+- Thay provider phải sửa nhiều use case.
+- Test một rule nghiệp vụ phải dựng database/cache/API thật.
+- Exception/response model của external provider lan vào application layer.
 
 Giảm coupling bằng:
 
-- Interface ở đúng boundary.
-- Dependency Injection.
-- Adapter cho external service.
-- Event hoặc message khi không cần gọi đồng bộ.
-- Tách business logic khỏi infrastructure.
+- Adapter ở boundary external service.
+- Interface cho dependency có biến thể thật.
+- Application service điều phối use case.
+- Event/message cho side effect không cần đồng bộ.
 
-### 5.2 Cohesion
+### 9.2 Cohesion
 
-Cohesion là mức độ các phần trong một module thật sự thuộc về nhau.
+Cohesion cao khi các thành phần trong module cùng phục vụ một mục tiêu rõ.
 
-Cohesion thấp thường có dấu hiệu:
+Dấu hiệu cohesion thấp:
 
-- Class tên rất chung: `CommonService`, `HelperService`, `Manager`, `Utils`.
-- Một service chứa nhiều use case không liên quan.
-- Method trong class dùng các nhóm field khác nhau hoàn toàn.
-- Team không biết ai sở hữu logic đó.
+- Class tên `CommonService`, `Helper`, `Manager`, `Utility`.
+- Một service xử lý nhiều nghiệp vụ không liên quan.
+- Method trong class dùng các nhóm dependency khác nhau hoàn toàn.
 
 Tăng cohesion bằng:
 
-- Đặt tên theo nghiệp vụ/use case.
+- Đặt tên theo use case hoặc nghiệp vụ.
 - Tách module theo boundary nghiệp vụ.
-- Tách service theo trách nhiệm thay đổi.
-- Đưa logic domain về gần entity/value object/domain service nếu phù hợp.
+- Đưa rule về gần domain model/domain service khi phù hợp.
 
 ---
 
-## 6. Composition over Inheritance
+## 10. Composition over Inheritance
 
-Ưu tiên composition hơn inheritance là một nguyên tắc quan trọng khi thiết kế hệ thống lớn.
-
-Inheritance hợp lý khi quan hệ thật sự là "is-a" và contract của class cha ổn định.
-
-Composition hợp lý khi ta muốn lắp ghép hành vi:
+Ưu tiên composition khi muốn lắp ghép hành vi.
 
 ```csharp
 public class OrderProcessor
@@ -382,41 +731,48 @@ public class OrderProcessor
 }
 ```
 
-Ở đây `OrderProcessor` không cần kế thừa `BaseProcessor`. Nó compose các hành vi cần dùng.
+Inheritance phù hợp khi:
 
-Inheritance dễ gây vấn đề khi:
+- Quan hệ thật sự là `is-a`.
+- Contract cha ổn định.
+- Class con không phải override để né logic cha.
 
-- Base class ngày càng phình.
-- Class con override nhiều method để "né" logic cha.
-- Thứ tự gọi `base.Method()` trở thành bẫy.
-- Một thay đổi ở base làm vỡ nhiều class con.
+Composition phù hợp khi:
 
-Quy tắc nhanh:
+- Cần thay thế hành vi theo runtime/config.
+- Cần test từng dependency.
+- Muốn tránh base class phình to.
+
+Quy tắc:
 
 ```text
-Cần tái sử dụng hành vi linh hoạt -> Composition
-Cần biểu diễn phân cấp thật sự ổn định -> Inheritance
-Không chắc -> Composition trước
+Không chắc nên inheritance hay composition -> ưu tiên composition.
 ```
 
 ---
 
-## 7. Abstraction đúng và abstraction giả
+## 11. Abstraction đúng và abstraction giả
 
-Abstraction đúng giúp che chi tiết không quan trọng và làm rõ ý định nghiệp vụ.
+Abstraction đúng che chi tiết biến động và làm rõ ý định nghiệp vụ.
 
-Ví dụ abstraction tốt:
+Ví dụ tốt:
 
 ```csharp
 public interface IPaymentGateway
 {
-    Task<PaymentResult> ChargeAsync(PaymentRequest request, CancellationToken cancellationToken);
+    Task<PaymentResult> ChargeAsync(
+        PaymentRequest request,
+        CancellationToken cancellationToken);
 }
 ```
 
-Use case không cần biết provider là Stripe, OnePay, VNPay hay mock trong test.
+Abstraction này có giá trị vì:
 
-Abstraction giả thường có dạng:
+- Payment provider có thể thay đổi.
+- SDK bên ngoài không nên rò vào business code.
+- Có thể test payment use case bằng fake gateway.
+
+Abstraction yếu:
 
 ```csharp
 public interface IUserRepository
@@ -429,107 +785,167 @@ public interface IUserRepository
 }
 ```
 
-Interface này chưa chắc sai. Nhưng nếu nó chỉ mirror CRUD của EF Core, không thêm ý nghĩa nghiệp vụ, không giúp test, không che complexity thật, thì có thể chỉ là một tầng gián tiếp dư thừa.
+Interface này không tự động sai. Nhưng nếu nó chỉ mirror CRUD của EF Core, không che query phức tạp, không chứa ngôn ngữ nghiệp vụ, không giúp test đáng kể, thì giá trị thấp.
 
-Trước khi thêm abstraction, hỏi:
+Checklist trước khi thêm abstraction:
 
-1. Có ít nhất hai implementation thật hoặc khả năng thay đổi provider rõ ràng không?
-2. Abstraction có che được chi tiết infrastructure không?
-3. Nó có làm business logic dễ test hơn không?
-4. Nó có làm code đọc theo ngôn ngữ nghiệp vụ hơn không?
-5. Nó có giảm coupling thật, hay chỉ đổi coupling từ class sang interface?
+1. Có biến thể implementation thật không?
+2. Có che chi tiết infrastructure không?
+3. Có làm use case dễ test hơn không?
+4. Có thể hiện ngôn ngữ nghiệp vụ tốt hơn không?
+5. Có giảm coupling thật không?
+6. Có làm debug khó hơn đáng kể không?
 
 ---
 
-## 8. Tư duy chọn pattern
+## 12. Senior review một giải pháp dùng pattern
 
-Khi gặp một vấn đề thiết kế, đừng bắt đầu bằng câu hỏi "dùng pattern nào?". Hãy bắt đầu bằng các câu hỏi sau:
+Khi review một design, không chỉ hỏi "pattern này đúng không". Cần đánh giá theo các lớp sau.
 
-1. Vấn đề hiện tại là gì: duplicate, coupling, khó test, thay đổi nhiều, performance, consistency hay reliability?
-2. Phần nào thay đổi thường xuyên nhất?
-3. Phần nào nên ổn định?
-4. Có boundary rõ giữa business và infrastructure chưa?
-5. Nếu thêm một biến thể mới, mình phải sửa bao nhiêu nơi?
-6. Nếu test use case này, mình có cần dựng external dependency thật không?
-7. Pattern được chọn có làm code dễ đọc hơn với team hiện tại không?
-8. Chi phí thêm tầng abstraction có đáng với lợi ích không?
+### 12.1 Fit với bài toán
 
-Ví dụ mapping nhanh:
-
-| Vấn đề | Pattern thường cân nhắc |
+| Câu hỏi | Ý nghĩa |
 |---|---|
-| Nhiều thuật toán/rule thay thế nhau | Strategy |
-| Cần tạo object phức tạp từng bước | Builder |
-| Cần che API phức tạp phía sau | Facade |
-| Cần bọc thêm hành vi quanh object | Decorator |
-| Cần chuyển đổi interface external service | Adapter |
-| Cần tách đọc/ghi vì áp lực khác nhau | CQRS |
-| Cần đảm bảo event được publish sau commit DB | Outbox |
-| Cần retry lỗi tạm thời external service | Retry + Circuit Breaker |
-| Cần query nghiệp vụ tái sử dụng | Specification / Query Object |
+| Pattern giải quyết pain point nào? | Tránh dùng pattern vì thói quen |
+| Pain point đã xuất hiện thật chưa? | Tránh speculative design |
+| Có giải pháp nhẹ hơn không? | Tránh over-engineering |
+
+### 12.2 Fit với boundary
+
+| Câu hỏi | Ý nghĩa |
+|---|---|
+| Business code có bớt biết infrastructure không? | Đánh giá coupling |
+| Boundary domain/application/infrastructure có rõ hơn không? | Đánh giá architecture |
+| Dependency direction có đúng không? | Tránh application phụ thuộc ngược |
+
+### 12.3 Fit với vận hành
+
+| Câu hỏi | Ý nghĩa |
+|---|---|
+| Khi lỗi production có trace được flow không? | Observability |
+| Retry có an toàn không? | Idempotency |
+| Transaction có rõ không? | Consistency |
+| Config sai thì fail fast hay fail muộn? | Reliability |
+
+### 12.4 Fit với team
+
+| Câu hỏi | Ý nghĩa |
+|---|---|
+| Team có hiểu pattern này không? | Maintainability |
+| Naming có theo nghiệp vụ không? | Readability |
+| File/class có tăng quá nhiều không? | Complexity |
 
 ---
 
-## 9. Dấu hiệu đang over-engineering
+## 13. Dấu hiệu over-engineering
 
-Một thiết kế có thể đang quá tay nếu:
+Một design có khả năng quá tay nếu:
 
-- Một use case đơn giản đi qua quá nhiều tầng nhưng không có lý do rõ.
-- Có nhiều interface chỉ có đúng một implementation và không che chi tiết gì quan trọng.
+- Use case đơn giản nhưng đi qua quá nhiều layer.
+- Có nhiều interface chỉ có một implementation và không che chi tiết nào quan trọng.
 - Tên class toàn pattern name nhưng thiếu ngôn ngữ nghiệp vụ.
-- Logic bị chia nhỏ đến mức muốn hiểu flow phải mở 10 file.
-- Dùng CQRS/Mediator/Event cho CRUD đơn giản nhưng không có áp lực scale, audit, async hay cross-boundary.
-- Team khó debug hơn sau khi thêm pattern.
+- Muốn hiểu flow phải mở quá nhiều file.
+- Dùng Mediator/CQRS/Event cho CRUD đơn giản không có nhu cầu rõ.
+- Pattern làm test setup phức tạp hơn.
+- Pattern làm production trace khó hơn.
 
-Pattern tốt phải làm hệ thống dễ thay đổi hơn. Nếu pattern làm code khó hiểu hơn mà không mua lại được lợi ích rõ, đó là nợ thiết kế.
+Over-engineering không phải vì "có nhiều class". Nó xảy ra khi complexity tăng nhưng không mua lại được khả năng thay đổi, test, vận hành hoặc giảm rủi ro tương ứng.
 
 ---
 
-## 10. Dấu hiệu cần pattern
+## 14. Dấu hiệu cần pattern
 
-Ngược lại, nên cân nhắc pattern khi:
+Nên cân nhắc pattern khi:
 
-- `if/else` hoặc `switch` tăng liên tục theo biến thể nghiệp vụ.
-- Nhiều service gọi external API theo cách giống nhau nhưng xử lý lỗi không đồng nhất.
-- Test business logic khó vì dính database, cache, queue, email.
+- `if/else` hoặc `switch` tăng theo biến thể nghiệp vụ.
+- Rule thay đổi thường xuyên theo khách hàng/tenant/campaign.
+- Business logic gọi trực tiếp external SDK/API.
+- Test use case cần dựng quá nhiều dependency thật.
+- Transaction, event, audit, cache invalidation rải rác.
 - Một thay đổi nhỏ phải sửa nhiều module.
-- Transaction, event, audit, cache invalidation bị xử lý rải rác.
-- Có nhiều team/module cùng phụ thuộc vào một vùng code chưa có boundary rõ.
+- Có side effect cần retry, idempotency, monitoring.
 
 ---
 
-## 11. Checklist review thiết kế ở mức middle/senior
+## 15. Template ghi quyết định thiết kế
 
-Khi review một thiết kế dùng pattern, hãy hỏi:
-
-1. Pattern này giải quyết vấn đề cụ thể nào?
-2. Vấn đề đó đã xuất hiện thật chưa, hay đang đoán trước quá xa?
-3. Boundary giữa domain/application/infrastructure có rõ hơn không?
-4. Thêm một biến thể mới có dễ hơn không?
-5. Unit test có dễ hơn không?
-6. Debug production có khó hơn nhiều không?
-7. Tên abstraction có nói bằng ngôn ngữ nghiệp vụ không?
-8. Nếu bỏ pattern này đi, code có đơn giản hơn mà vẫn đủ tốt không?
-9. Team hiện tại có hiểu và vận hành được pattern này không?
-10. Có pattern nào nhẹ hơn giải quyết được 80% vấn đề không?
-
----
-
-## 12. Tư duy chốt
-
-Design Pattern là công cụ để quản lý thay đổi. Middle biết dùng pattern để giảm lặp và tăng testability. Senior biết cả khi nào **không** dùng pattern.
-
-Trong .NET Core, hãy bắt đầu từ những nền tảng rất thực tế:
-
-- Dependency Injection để đảo chiều phụ thuộc.
-- Interface ở boundary có lý do rõ.
-- Service tập trung vào use case.
-- Infrastructure được bọc sau abstraction khi cần.
-- Composition trước inheritance.
-- Pattern chỉ xuất hiện khi nó làm code dễ thay đổi, dễ test, dễ hiểu hơn.
+Khi chọn pattern cho một phần quan trọng, nên ghi lại quyết định ngắn gọn.
 
 ```text
-Không có pattern nào miễn phí.
-Mỗi pattern mua cho ta một lợi ích, nhưng trả bằng complexity.
-Senior design là biết lợi ích nào đáng mua, và lúc nào nên giữ code đơn giản.
+Context:
+  Payment provider thay đổi theo tenant và có roadmap thêm provider mới.
+
+Decision:
+  Dùng IPaymentGateway + Adapter cho từng provider.
+  Dùng PaymentGatewayFactory để chọn provider theo runtime parameter.
+
+Alternatives:
+  1. Hard-code switch trong PaymentService.
+  2. Abstract Factory cho cả bộ payment/refund/callback service.
+
+Reason:
+  Provider hiện chỉ cần charge payment, chưa cần tạo family service.
+  Adapter cô lập SDK provider.
+  Factory giải quyết runtime selection.
+
+Trade-off:
+  Tăng thêm class/interface.
+  Đổi lại test provider dễ hơn và thêm provider ít sửa code cũ hơn.
+
+Risks:
+  Cần idempotency key.
+  Cần timeout/retry policy.
+  Cần audit log payment request/response.
+```
+
+Đây là cách senior biến pattern thành quyết định kỹ thuật có ngữ cảnh, không phải khẩu quyết.
+
+---
+
+## 16. Tóm tắt quy trình đánh giá
+
+```text
+1. Xác định use case, input, output nghiệp vụ.
+2. Liệt kê dependency kỹ thuật.
+3. Tìm change points: rule, provider, format, tenant, state, config.
+4. Xác định runtime parameters và nơi load.
+5. Xác định lifecycle: singleton/scoped/transient.
+6. Xác định transaction và consistency boundary.
+7. Đánh giá testability và operational risk.
+8. So sánh giải pháp trực tiếp với giải pháp dùng pattern.
+9. Chọn pattern nhẹ nhất giải quyết đúng pain point.
+10. Ghi rõ trade-off và rủi ro còn lại.
+```
+
+---
+
+## 17. Tư duy chốt
+
+Design Pattern là công cụ quản lý thay đổi.
+
+Middle engineer thường hỏi:
+
+```text
+Pattern nào phù hợp với bài toán này?
+```
+
+Senior engineer hỏi thêm:
+
+```text
+Bài toán này có đáng dùng pattern chưa?
+Pattern này đang mua lợi ích gì?
+Chi phí complexity là bao nhiêu?
+Khi production lỗi, flow này có trace được không?
+Nếu thêm biến thể mới, code cũ có phải sửa nhiều không?
+Team có vận hành được design này không?
+```
+
+Một pattern tốt làm hệ thống dễ thay đổi hơn, dễ test hơn, boundary rõ hơn, và rủi ro vận hành thấp hơn.
+
+Một pattern xấu chỉ làm code trông có vẻ "kiến trúc" hơn nhưng khó đọc, khó debug, khó sửa hơn.
+
+```text
+Không có pattern miễn phí.
+Mỗi pattern mua một lợi ích bằng complexity.
+Senior design là biết lợi ích nào đáng mua, lúc nào nên mua, và lúc nào nên giữ code đơn giản.
 ```

@@ -1,6 +1,6 @@
-# 01. Mindset & Clean Code Backend
+# Mindset & Clean Code Backend
 
-Bài này là phần mở đầu của lộ trình **Backend Engineering**. Mục tiêu không phải học thêm một pattern thật kêu, mà là xây nền tư duy để code backend rõ hơn, ổn định hơn và ít làm codebase trượt dần theo thời gian.
+Tài liệu này xây nền tư duy để code backend rõ hơn, ổn định hơn và ít làm codebase trượt dần theo thời gian.
 
 Một backend developer tiến lên middle/senior không chỉ vì viết được API phức tạp hơn. Điểm khác biệt lớn hơn là biết nhìn một feature như một use case có rủi ro dữ liệu, boundary, transaction, permission, test và vận hành production.
 
@@ -172,7 +172,7 @@ DTO/input/output:
 -> contract với client, không phải entity persistence
 ```
 
-Bài tiếp theo sẽ đi sâu vào từng lớp này. Ở bài 01, chỉ cần nhớ một câu:
+Chủ đề **Architecture & Layering** sẽ đi sâu vào từng lớp này. Ở phần nền tảng, chỉ cần nhớ một câu:
 
 ```text
 Code ổn định khi mỗi đoạn code có lý do tồn tại rõ ràng.
@@ -296,7 +296,7 @@ Production:
 
 ---
 
-## 11. Tóm tắt bài 01
+## 11. Tóm tắt
 
 ```text
 Junior hỏi: viết sao cho chạy?
@@ -304,7 +304,7 @@ Middle hỏi: viết sao cho rõ và ít bug?
 Senior hỏi: viết sao cho dữ liệu đúng, team maintain được, production debug được?
 ```
 
-Bài này là nền. Từ bài sau, ta đi vào phần quan trọng nhất để code backend bớt lộn xộn:
+Sau phần nền tảng, chủ đề quan trọng nhất để code backend bớt lộn xộn là:
 
 ```text
 Architecture & Layering: đặt code ở đúng lớp.
