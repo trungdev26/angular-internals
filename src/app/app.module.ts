@@ -24,6 +24,10 @@ import {
   CodeOutline,
   ClusterOutline,
   FormOutline,
+  BranchesOutline,
+  ShareAltOutline,
+  ApiOutline,
+  GlobalOutline,
 } from '@ant-design/icons-angular/icons';
 import { NzImageModule } from 'ng-zorro-antd/image';
 import { NzInputNumberModule } from 'ng-zorro-antd/input-number';
@@ -71,6 +75,10 @@ registerLocaleData(en);
       CodeOutline,
       ClusterOutline,
       FormOutline,
+      BranchesOutline,
+      ShareAltOutline,
+      ApiOutline,
+      GlobalOutline,
     ]),
     NzImageModule,
     NzInputNumberModule,

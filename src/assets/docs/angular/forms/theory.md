@@ -283,13 +283,7 @@ Ví dụ:
 this.form.get('amount')?.setValue(100000);
 ```
 
-Hoặc user nhập trên UI:
-
-```html
-<input formControlName="amount">
-```
-
-Lifecycle tổng quát:
+Lifecycle tổng quát (đúng theo thứ tự trong `AbstractControl.updateValueAndValidity()` của `@angular/forms`):
 
 ```text
 Value thay đổi
@@ -298,24 +292,43 @@ Control cập nhật value nội bộ
 ↓
 Control chạy sync validators
 ↓
-Nếu sync validator pass và có async validators
-    ↓
-    status = PENDING
-    ↓
-    chạy async validators
+Control tính errors từ kết quả sync validator
 ↓
-Control tính errors
+Control tính status từ errors
+    VALID / INVALID / DISABLED
 ↓
-Control tính status mới
-    VALID / INVALID / PENDING / DISABLED
+Nếu status là VALID (hoặc đang PENDING từ trước) và control có async validator
+    ↓
+    status bị ghi đè thành PENDING
+    ↓
+    Async validator bắt đầu chạy (bất đồng bộ, không block các bước dưới)
 ↓
 Emit valueChanges nếu emitEvent !== false
 ↓
-Emit statusChanges nếu status đổi và emitEvent !== false
+Emit statusChanges nếu emitEvent !== false
+    (status lúc này là PENDING nếu control có async validator)
 ↓
 Thông báo lên parent FormGroup / FormArray nếu onlySelf !== true
 ↓
 Parent tính lại value/status
+```
+
+Lưu ý quan trọng hay bị hiểu sai: **status không "tính ra PENDING"** — `_calculateStatus()` chỉ trả về `VALID`/`INVALID`/`DISABLED`. `PENDING` là do `_runAsyncValidator()` **ghi đè trực tiếp** lên `status` ngay sau đó, trong cùng một lượt `updateValueAndValidity()` đồng bộ.
+
+Vì vậy nếu control có async validator, `valueChanges`/`statusChanges` thực tế bắn ra **2 lần** cho một lần value đổi:
+
+```text
+Lần 1 (đồng bộ, ngay trong updateValueAndValidity):
+  statusChanges emit PENDING
+
+Lần 2 (bất đồng bộ, khi async validator resolve):
+  async validator trả về errors
+  ↓
+  control.setErrors(errors) được gọi
+  ↓
+  status tính lại: VALID / INVALID
+  ↓
+  statusChanges emit VALID / INVALID
 ```
 
 Tóm gọn:
