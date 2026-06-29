@@ -10,6 +10,7 @@
         *ngFor="let section of menuSections"
         class="app-menu__section"
         [nzTitle]="section.title"
+        [title]="section.title"
         [nzIcon]="section.icon"
         [nzOpen]="!!section.open"
       >
@@ -19,6 +20,7 @@
             *ngFor="let group of section.groups"
             class="app-menu__group"
             [nzTitle]="group.title"
+            [title]="group.title"
             [nzIcon]="group.icon"
             [nzOpen]="!!group.open"
             [nzDisabled]="!!group.disabled"
@@ -28,6 +30,7 @@
                 nz-menu-item
                 *ngFor="let item of group.items"
                 [nzDisabled]="!item.link"
+                [title]="item.label"
                 [routerLink]="item.link"
                 routerLinkActive="ant-menu-item-selected"
               >

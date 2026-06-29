@@ -18,6 +18,52 @@
   min-width: 0;
 }
 
+:host ::ng-deep .markdown-body pre {
+  margin: 16px 0 20px;
+  padding: 18px 20px;
+  overflow: auto;
+  color: #d7dde8;
+  background: #20242c;
+  border: 1px solid #343b49;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+:host ::ng-deep .markdown-body pre code {
+  display: block;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre;
+}
+
+:host ::ng-deep .markdown-body :not(pre) > code {
+  padding: 2px 5px;
+  color: #c7254e;
+  background: #fff1f0;
+  border: 1px solid #ffd6d6;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+
+:host ::ng-deep .markdown-body pre[class*='language-'],
+:host ::ng-deep .markdown-body code[class*='language-'] {
+  color: #d7dde8;
+  background: #20242c;
+  text-shadow: none;
+}
+
+:host ::ng-deep .markdown-body .token.operator,
+:host ::ng-deep .markdown-body .token.entity,
+:host ::ng-deep .markdown-body .token.url,
+:host ::ng-deep .markdown-body .language-css .token.string,
+:host ::ng-deep .markdown-body .style .token.string {
+  background: transparent;
+}
+
 .doc-toc {
   flex-shrink: 0;
   width: 260px;
@@ -28,21 +74,6 @@
   overflow-y: auto;
   font-size: 13px;
   line-height: 1.5;
-  scrollbar-width: thin;
-  scrollbar-color: #d9d9d9 transparent;
-
-  &::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  &::-webkit-scrollbar-thumb {
-    background: #d9d9d9;
-    border-radius: 3px;
-  }
-
-  &::-webkit-scrollbar-track {
-    background: transparent;
-  }
 }
 
 .doc-toc-title {
