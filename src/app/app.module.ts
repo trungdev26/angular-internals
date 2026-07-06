@@ -32,6 +32,14 @@ import {
   LineChartOutline,
   DeploymentUnitOutline,
   SyncOutline,
+  SendOutline,
+  PlusOutline,
+  MinusOutline,
+  FireOutline,
+  ToolOutline,
+  ReloadOutline,
+  SafetyOutline,
+  SafetyCertificateOutline,
 } from '@ant-design/icons-angular/icons';
 import { NzImageModule } from 'ng-zorro-antd/image';
 import { NzInputNumberModule } from 'ng-zorro-antd/input-number';
@@ -49,6 +57,8 @@ import { IndicatorRowOnpushComponent } from './features/change-detection/compone
 import { IndicatorRowOnpushPipeComponent } from './features/change-detection/components/cd-onpush-pipe/indicator-row-onpush-pipe.component';
 import { FpsMeterComponent } from './base/components/fps-meter/fps-meter.component';
 import { RiskScorePipe } from './features/change-detection/pipes/risk-score.pipe';
+import { ClusterDemoComponent } from './features/system-design/cluster/cluster-demo.component';
+import { ClusterTheoryComponent } from './features/system-design/cluster/cluster-theory.component';
 
 registerLocaleData(en);
 
@@ -63,6 +73,8 @@ registerLocaleData(en);
     IndicatorRowOnpushPipeComponent,
     FpsMeterComponent,
     RiskScorePipe,
+    ClusterDemoComponent,
+    ClusterTheoryComponent,
   ],
   imports: [
     BrowserModule,
@@ -87,6 +99,14 @@ registerLocaleData(en);
       LineChartOutline,
       DeploymentUnitOutline,
       SyncOutline,
+      SendOutline,
+      PlusOutline,
+      MinusOutline,
+      FireOutline,
+      ToolOutline,
+      ReloadOutline,
+      SafetyOutline,
+      SafetyCertificateOutline,
     ]),
     NzImageModule,
     NzInputNumberModule,

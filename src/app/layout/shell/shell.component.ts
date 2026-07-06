@@ -1,4 +1,5 @@
-import { Component, ElementRef, ViewChild } from '@angular/core';
+import { Component, ElementRef, OnInit, ViewChild } from '@angular/core';
+import { Router } from '@angular/router';
 import { MENU_SECTIONS } from './menu.config';
 
 @Component({
@@ -6,7 +7,7 @@ import { MENU_SECTIONS } from './menu.config';
   templateUrl: './shell.component.html',
   styleUrls: ['./shell.component.scss'],
 })
-export class ShellComponent {
+export class ShellComponent implements OnInit {
   readonly menuSections = MENU_SECTIONS;
 
   collapsed = false;
@@ -14,6 +15,17 @@ export class ShellComponent {
 
   @ViewChild('appContent', { read: ElementRef })
   private appContent!: ElementRef<HTMLElement>;
+
+  constructor(private readonly router: Router) {}
+
+  ngOnInit(): void {
+    const url = this.router.url;
+    for (const section of this.menuSections) {
+      section.open = section.groups.some((group) =>
+        group.items.some((item) => !!item.link && url.startsWith(item.link)),
+      );
+    }
+  }
 
   onContentScroll(event: Event): void {
     this.showBackToTop = (event.target as HTMLElement).scrollTop > 300;

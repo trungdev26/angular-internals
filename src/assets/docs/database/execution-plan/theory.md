@@ -1,4 +1,4 @@
-# Execution Plan trong Database: từ cơ bản đến tư duy Middle/Senior
+# Execution Plan trong Database
 
 Execution Plan là bản mô tả cách database dự định hoặc đã thực sự chạy một câu SQL.
 
@@ -1279,7 +1279,173 @@ Index là một cách tối ưu, không phải câu trả lời duy nhất.
 
 ---
 
-## 39. Tư duy senior khi đọc plan
+## 39. EXPLAIN và EXPLAIN ANALYZE
+
+Trong PostgreSQL/MySQL, `EXPLAIN` là cách xem database dự định chạy query thế nào.
+
+```sql
+EXPLAIN
+SELECT Id, OrderNo, CreatedAt
+FROM Orders
+WHERE CustomerId = 10
+ORDER BY CreatedAt DESC;
+```
+
+`EXPLAIN ANALYZE` chạy query thật rồi trả thêm thông tin runtime.
+
+```sql
+EXPLAIN ANALYZE
+SELECT Id, OrderNo, CreatedAt
+FROM Orders
+WHERE CustomerId = 10
+ORDER BY CreatedAt DESC;
+```
+
+Khác biệt quan trọng:
+
+| Lệnh | Có chạy thật không? | Dùng để làm gì? |
+|---|---:|---|
+| `EXPLAIN` | Thường không chạy query thật | Xem plan dự kiến, an toàn hơn với query nặng |
+| `EXPLAIN ANALYZE` | Có chạy thật | So sánh estimated với actual, đo runtime thật |
+
+Với câu `SELECT`, `EXPLAIN ANALYZE` thường an toàn hơn nhưng vẫn có thể tốn CPU/IO nếu query nặng. Với `INSERT`, `UPDATE`, `DELETE`, phải cực kỳ cẩn thận vì database có thể thực thi thay đổi thật tùy hệ quản trị và cú pháp dùng.
+
+Trong SQL Server, tư duy tương tự nằm ở:
+
+- Estimated Execution Plan
+- Actual Execution Plan
+- `SET STATISTICS IO ON`
+- `SET STATISTICS TIME ON`
+
+Điểm cần nhớ: estimated plan cho biết database nghĩ gì. Actual plan hoặc `EXPLAIN ANALYZE` cho biết chuyện gì đã thật sự xảy ra.
+
+---
+
+## 40. Cách đọc EXPLAIN theo thứ tự
+
+Đừng mở plan lên rồi nhảy ngay vào câu hỏi "có dùng index không?".
+
+Một thứ tự đọc thực dụng:
+
+1. Query trả bao nhiêu dòng?
+2. Bảng chính có bao nhiêu dòng?
+3. Operator nào xử lý nhiều dòng nhất?
+4. Operator nào tốn thời gian nhất?
+5. Estimated rows và actual rows lệch bao nhiêu?
+6. Có scan lớn không, scan đó có hợp lý không?
+7. Có key lookup lặp nhiều không?
+8. Có sort/hash/aggregate lớn không?
+9. Có spill ra disk/tempdb không?
+10. Predicate có SARGable không?
+11. Index hiện có có khớp `WHERE`, `JOIN`, `ORDER BY` không?
+12. Query có đang trả quá nhiều cột/dòng so với nhu cầu thật không?
+
+Nếu query trả 80% bảng, scan có thể là lựa chọn đúng. Nếu query trả 50 dòng nhưng plan đọc 1 triệu dòng rồi sort, đó mới là tín hiệu cần xử lý.
+
+Một câu hỏi middle hay hỏi:
+
+```text
+Vì sao query không dùng index?
+```
+
+Một câu hỏi senior hơn:
+
+```text
+Nếu dùng index thì có thật sự rẻ hơn scan không, với số dòng thực tế này?
+```
+
+---
+
+## 41. Đọc EXPLAIN qua ví dụ production
+
+Query danh sách hóa đơn:
+
+```sql
+SELECT Id, InvoiceNo, CustomerId, TotalAmount, Status, InvoiceDate
+FROM Invoices
+WHERE TenantId = @tenantId
+  AND ShopId = @shopId
+  AND IsDeleted = 0
+  AND InvoiceDate >= @fromDate
+  AND InvoiceDate < @toDate
+ORDER BY InvoiceDate DESC, Id DESC
+OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY;
+```
+
+Plan hiện tại:
+
+```text
+Index Scan IX_Invoices_Tenant
+Residual predicate: ShopId, IsDeleted, InvoiceDate
+Sort InvoiceDate DESC, Id DESC
+Key Lookup x 180000
+Return 50 rows
+```
+
+Đọc plan:
+
+- Có dùng index, nhưng index chỉ giúp một phần
+- `ShopId`, `IsDeleted`, `InvoiceDate` bị lọc sau khi đã đọc nhiều dòng
+- Sort lớn xảy ra trước pagination
+- Key lookup lặp quá nhiều chỉ để trả 50 dòng
+
+Index có thể cân nhắc:
+
+```sql
+CREATE INDEX IX_Invoices_Tenant_Shop_Date_Id
+ON Invoices(TenantId, ShopId, InvoiceDate DESC, Id DESC)
+INCLUDE (InvoiceNo, CustomerId, TotalAmount, Status)
+WHERE IsDeleted = 0;
+```
+
+Nếu database không hỗ trợ filtered index:
+
+```sql
+CREATE INDEX IX_Invoices_Tenant_Shop_IsDeleted_Date_Id
+ON Invoices(TenantId, ShopId, IsDeleted, InvoiceDate DESC, Id DESC)
+INCLUDE (InvoiceNo, CustomerId, TotalAmount, Status);
+```
+
+Sau khi thêm index, không được dừng ở "đã tạo index". Phải đo lại:
+
+- Logical reads giảm không?
+- Sort lớn còn không?
+- Key lookup còn không?
+- Actual rows có khớp estimate hơn không?
+- Write latency của bảng `Invoices` có tăng đáng kể không?
+- Index mới có trùng hoặc gần trùng index cũ không?
+
+---
+
+## 42. Những bẫy khi đọc EXPLAIN
+
+### 42.1. Chỉ nhìn cost
+
+Cost là mô hình ước lượng của database, không phải thời gian tuyệt đối. Operator cost cao đáng để xem, nhưng không đủ để kết luận.
+
+### 42.2. Thấy scan là thêm index
+
+Scan có thể hợp lý nếu query trả nhiều dữ liệu. Vấn đề có thể nằm ở use case, pagination, export async hoặc report model.
+
+### 42.3. Thấy seek là yên tâm
+
+Seek trả ra quá nhiều dòng, hoặc seek xong lookup hàng trăm nghìn lần, vẫn có thể rất chậm.
+
+### 42.4. Tin missing index suggestion tuyệt đối
+
+Suggestion không biết write workload, index trùng, nghiệp vụ hot path, dung lượng và cách rollback. Nó là gợi ý điều tra, không phải lệnh phải làm.
+
+### 42.5. Quên data skew
+
+Tenant nhỏ và tenant lớn có thể cần plan khác nhau. Một plan đẹp ở dev hoặc staging chưa chắc chịu được production.
+
+### 42.6. Quên nhìn toàn bộ request
+
+Từng query có plan đẹp nhưng API vẫn chậm nếu có N+1 query, payload quá lớn, lock/blocking, connection pool cạn hoặc UI render quá nhiều dòng.
+
+---
+
+## 43. Tư duy senior khi đọc plan
 
 Junior thường hỏi:
 
@@ -1311,7 +1477,7 @@ Execution plan là nơi database nói thật với mình, nhưng mình phải bi
 
 ---
 
-## 40. Câu tổng kết
+## 44. Câu tổng kết
 
 Execution Plan không phải công cụ chỉ dành cho DBA.
 

@@ -1,4 +1,4 @@
-import { AfterViewInit, Component, ElementRef, OnDestroy } from '@angular/core';
+import { AfterViewInit, Component, ElementRef, Input, OnDestroy } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { NzImageService } from 'ng-zorro-antd/image';
 
@@ -14,7 +14,7 @@ export interface TocItem {
   styleUrls: ['./markdown-doc.component.scss'],
 })
 export class MarkdownDocComponent implements AfterViewInit, OnDestroy {
-  readonly docSrc: string;
+  @Input() docSrc?: string;
   tocItems: TocItem[] = [];
   activeId: string | null = null;
 

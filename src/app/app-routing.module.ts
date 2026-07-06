@@ -2,6 +2,8 @@ import { NgModule } from '@angular/core';
 import { RouterModule, Routes } from '@angular/router';
 import { MarkdownDocComponent } from './base/components/markdown-doc/markdown-doc.component';
 import { IndicatorsTableComponent } from './features/change-detection/components/indicators-table.component';
+import { ClusterDemoComponent } from './features/system-design/cluster/cluster-demo.component';
+import { ClusterTheoryComponent } from './features/system-design/cluster/cluster-theory.component';
 
 const routes: Routes = [
   { path: '', redirectTo: 'angular/change-detection/theory', pathMatch: 'full' },
@@ -87,6 +89,18 @@ const routes: Routes = [
     ],
   },
   {
+    path: 'angular/case-studies',
+    children: [
+      {
+        path: 'authenticate-shared-global',
+        component: MarkdownDocComponent,
+        data: {
+          docSrc: 'assets/docs/angular/case-studies/authenticate-shared-global.md',
+        },
+      },
+    ],
+  },
+  {
     path: 'system-design/data-storage-strategy',
     children: [
       {
@@ -107,6 +121,26 @@ const routes: Routes = [
     ],
   },
   {
+    path: 'system-design/idempotency',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/system-design/idempotency/theory.md' },
+      },
+    ],
+  },
+  {
+    path: 'system-design/authenticate',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/system-design/authenticate/theory.md' },
+      },
+    ],
+  },
+  {
     path: 'system-design/load-parameter',
     children: [
       {
@@ -114,6 +148,13 @@ const routes: Routes = [
         component: MarkdownDocComponent,
         data: { docSrc: 'assets/docs/system-design/load-parameter/theory.md' },
       },
+    ],
+  },
+  {
+    path: 'system-design/cluster',
+    children: [
+      { path: 'theory', component: ClusterTheoryComponent },
+      { path: 'demo', component: ClusterDemoComponent },
     ],
   },
   {
@@ -254,6 +295,31 @@ const routes: Routes = [
         path: 'system-design-thinking',
         component: MarkdownDocComponent,
         data: { docSrc: 'assets/docs/backend-engineering/03-system-design-thinking.md' },
+      },
+    ],
+  },
+  {
+    path: 'dotnet-core',
+    children: [
+      {
+        path: 'task-thread-process',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/dotnet-core/task-thread-process.md' },
+      },
+      {
+        path: 'garbage-collector',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/dotnet-core/garbage-collector.md' },
+      },
+    ],
+  },
+  {
+    path: 'security',
+    children: [
+      {
+        path: 'theory',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/security/theory.md' },
       },
     ],
   },

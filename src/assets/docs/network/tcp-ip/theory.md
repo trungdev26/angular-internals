@@ -1,4 +1,4 @@
-# TCP/IP: từ cơ bản đến tư duy Middle/Senior
+# TCP/IP
 
 TCP/IP là nền tảng giúp các máy tính giao tiếp với nhau qua mạng. Khi gọi API, mở website, kết nối database, gửi message queue, dùng Redis, gọi payment gateway hay upload file, phía dưới gần như luôn có TCP/IP hoặc họ hàng của nó tham gia.
 
