@@ -12,9 +12,19 @@
         [nzTitle]="section.title"
         [title]="section.title"
         [nzIcon]="section.icon"
-        [nzOpen]="!!section.open"
+        [(nzOpen)]="section.open"
       >
         <ul>
+          <li
+            nz-menu-item
+            *ngFor="let item of section.items"
+            [nzDisabled]="!item.link"
+            [title]="item.label"
+            [routerLink]="item.link"
+            routerLinkActive="ant-menu-item-selected"
+          >
+            {{ item.label }}
+          </li>
           <li
             nz-submenu
             *ngFor="let group of section.groups"
@@ -22,7 +32,7 @@
             [nzTitle]="group.title"
             [title]="group.title"
             [nzIcon]="group.icon"
-            [nzOpen]="!!group.open"
+            [(nzOpen)]="group.open"
             [nzDisabled]="!!group.disabled"
           >
             <ul>

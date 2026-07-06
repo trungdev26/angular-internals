@@ -1,4 +1,4 @@
-# Transactions trong Database: từ cơ bản đến tư duy Middle/Senior
+# Transactions trong Database
 
 Transaction là cơ chế giúp một nhóm thao tác dữ liệu được xử lý như một đơn vị công việc thống nhất. Hoặc tất cả thay đổi cùng thành công, hoặc khi có lỗi thì database đưa dữ liệu về trạng thái trước đó.
 

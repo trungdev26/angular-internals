@@ -15,14 +15,14 @@ export interface MenuSection {
   title: string;
   icon: string;
   open?: boolean;
-  groups: MenuGroup[];
+  groups?: MenuGroup[];
+  items?: MenuItem[];
 }
 
 export const MENU_SECTIONS: MenuSection[] = [
   {
     title: 'Angular',
     icon: 'code',
-    open: true,
     groups: [
       {
         title: 'Change Detection',
@@ -68,6 +68,16 @@ export const MENU_SECTIONS: MenuSection[] = [
         items: [{ label: 'Lý thuyết', link: '/angular/dependency-injection/theory' }],
       },
       {
+        title: 'Case Studies',
+        icon: 'experiment',
+        items: [
+          {
+            label: '01. Authenticate Shared Global',
+            link: '/angular/case-studies/authenticate-shared-global',
+          },
+        ],
+      },
+      {
         title: 'Sắp có',
         icon: 'clock-circle',
         disabled: true,
@@ -76,12 +86,19 @@ export const MENU_SECTIONS: MenuSection[] = [
     ],
   },
   {
+    title: '.NET Core',
+    icon: 'tool',
+    items: [
+      { label: '01. Task, Thread và Process', link: '/dotnet-core/task-thread-process' },
+      { label: '02. Garbage Collector (GC)', link: '/dotnet-core/garbage-collector' },
+    ],
+  },
+  {
     title: 'System Design',
     icon: 'cluster',
-    open: true,
     groups: [
       {
-        title: 'Data Storage Strategy',
+        title: 'Data Storage',
         icon: 'database',
         items: [{ label: 'Lý thuyết', link: '/system-design/data-storage-strategy/theory' }],
       },
@@ -91,9 +108,27 @@ export const MENU_SECTIONS: MenuSection[] = [
         items: [{ label: 'Lý thuyết', link: '/system-design/cache/theory' }],
       },
       {
+        title: 'Idempotency',
+        icon: 'sync',
+        items: [{ label: 'Lý thuyết', link: '/system-design/idempotency/theory' }],
+      },
+      {
+        title: 'Authenticate',
+        icon: 'safety-certificate',
+        items: [{ label: 'Lý thuyết', link: '/system-design/authenticate/theory' }],
+      },
+      {
         title: 'Load Parameter',
         icon: 'line-chart',
         items: [{ label: 'Lý thuyết', link: '/system-design/load-parameter/theory' }],
+      },
+      {
+        title: 'Cluster',
+        icon: 'cluster',
+        items: [
+          { label: 'Lý thuyết', link: '/system-design/cluster/theory' },
+          { label: 'Minh họa', link: '/system-design/cluster/demo' },
+        ],
       },
       {
         title: 'Case Studies',
@@ -114,7 +149,6 @@ export const MENU_SECTIONS: MenuSection[] = [
   {
     title: 'Design Patterns',
     icon: 'code',
-    open: true,
     groups: [
       {
         title: 'Nền tảng',
@@ -141,7 +175,6 @@ export const MENU_SECTIONS: MenuSection[] = [
   {
     title: 'Frontend Engineering',
     icon: 'code',
-    open: true,
     groups: [
       {
         title: 'Code Like Senior',
@@ -186,7 +219,6 @@ export const MENU_SECTIONS: MenuSection[] = [
   {
     title: 'Backend Engineering',
     icon: 'api',
-    open: true,
     groups: [
       {
         title: 'Nền tảng',
@@ -213,36 +245,47 @@ export const MENU_SECTIONS: MenuSection[] = [
     ],
   },
   {
-    title: 'Database',
-    icon: 'database',
-    open: true,
+    title: 'Security',
+    icon: 'safety',
     groups: [
       {
-        title: 'Index',
+        title: 'Nền tảng',
+        icon: 'safety-certificate',
+        items: [{ label: 'Lý thuyết', link: '/security/theory' }],
+      },
+    ],
+  },
+  {
+    title: 'Database',
+    icon: 'database',
+    groups: [
+      {
+        title: 'Tối ưu truy vấn',
         icon: 'database',
-        items: [{ label: 'Lý thuyết', link: '/database/index/theory' }],
+        items: [
+          { label: 'Index', link: '/database/index/theory' },
+          { label: 'Execution Plan', link: '/database/execution-plan/theory' },
+        ],
       },
       {
-        title: 'Execution Plan',
-        icon: 'database',
-        items: [{ label: 'Lý thuyết', link: '/database/execution-plan/theory' }],
+        title: 'Giao dịch & đồng thời',
+        icon: 'sync',
+        items: [
+          { label: 'Transactions', link: '/database/transactions/theory' },
+          { label: 'Locking & Deadlock', link: '/database/locking-deadlock/theory' },
+        ],
       },
       {
-        title: 'Transactions',
-        icon: 'database',
-        items: [{ label: 'Lý thuyết', link: '/database/transactions/theory' }],
-      },
-      {
-        title: 'Locking & Deadlock',
-        icon: 'database',
-        items: [{ label: 'Lý thuyết', link: '/database/locking-deadlock/theory' }],
+        title: 'Vận hành',
+        icon: 'line-chart',
+        disabled: true,
+        items: [{ label: 'Statistics' }, { label: 'Partitioning' }, { label: 'Replication' }],
       },
     ],
   },
   {
     title: 'Network',
     icon: 'global',
-    open: true,
     groups: [
       {
         title: 'TCP/IP',

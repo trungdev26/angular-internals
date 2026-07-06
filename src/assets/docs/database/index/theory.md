@@ -1,4 +1,4 @@
-# Index trong Database: từ cơ bản đến tư duy Middle/Senior
+# Index trong Database
 
 Index là một cấu trúc dữ liệu phụ giúp database tìm dòng nhanh hơn. Nếu bảng là một cuốn sách, index giống mục lục: thay vì đọc từ đầu đến cuối, database đi theo cấu trúc đã sắp xếp để đến đúng vùng dữ liệu cần tìm.
 

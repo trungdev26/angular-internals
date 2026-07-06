@@ -1,0 +1,83 @@
+<section class="cluster-demo" aria-labelledby="cluster-demo-title">
+  <div class="cluster-demo__header">
+    <div>
+      <p class="cluster-demo__eyebrow">Minh họa tương tác</p>
+      <h2 id="cluster-demo-title">Load Balancer điều phối request trong Cluster</h2>
+    </div>
+  </div>
+
+  <div class="cluster-demo__metrics" aria-label="Chỉ số mô phỏng">
+    <div class="metric">
+      <span class="metric__label">Node sống</span>
+      <strong>{{ activeNodeCount }}</strong>
+    </div>
+    <div class="metric">
+      <span class="metric__label">Node lỗi</span>
+      <strong>{{ failedNodeCount }}</strong>
+    </div>
+    <div class="metric">
+      <span class="metric__label">Đã xử lý</span>
+      <strong>{{ handledRequestCount }}</strong>
+    </div>
+    <div class="metric">
+      <span class="metric__label">Đang bay</span>
+      <strong>{{ inFlightRequests.length }}</strong>
+    </div>
+  </div>
+
+  <div class="cluster-demo__toolbar" role="toolbar" aria-label="Điều khiển mô phỏng cluster">
+    <button nz-button nzType="primary" type="button" (click)="sendRequests(10)">
+      <span nz-icon nzType="send"></span>
+      Gửi 10 requests
+    </button>
+    <button nz-button type="button" (click)="addNode()">
+      <span nz-icon nzType="plus"></span>
+      Thêm node
+    </button>
+    <button nz-button type="button" (click)="removeNode()" [disabled]="nodes.length <= 1">
+      <span nz-icon nzType="minus"></span>
+      Xóa node
+    </button>
+    <button nz-button nzDanger type="button" (click)="failNode()" [disabled]="!activeNodeCount">
+      <span nz-icon nzType="fire"></span>
+      Làm hỏng node
+    </button>
+    <button nz-button type="button" (click)="recoverNodes()">
+      <span nz-icon nzType="tool"></span>
+      Phục hồi
+    </button>
+    <button nz-button type="button" (click)="resetRequests()">
+      <span nz-icon nzType="reload"></span>
+      Reset request
+    </button>
+  </div>
+
+  <div class="cluster-demo__workspace">
+    <div class="cluster-demo__graph" #graphContainer aria-label="Mô phỏng Client, Load Balancer và các App Node">
+      <div class="cluster-demo__empty" *ngIf="!activeNodeCount">
+        Không còn node sống. Phục hồi node để tiếp tục route request.
+      </div>
+    </div>
+
+    <aside class="cluster-demo__panel" aria-label="Trạng thái node">
+      <div class="panel-section">
+        <h3>Node pool</h3>
+        <div class="node-row" *ngFor="let node of nodes" [class.node-row--down]="!node.active">
+          <span class="node-row__dot"></span>
+          <span class="node-row__name">{{ node.label }}</span>
+          <span class="node-row__status">{{ node.active ? 'Healthy' : 'Unhealthy' }}</span>
+          <strong>{{ node.requestCount }}</strong>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3>Luồng xử lý</h3>
+        <ol class="flow-list">
+          <li>Client gửi request vào Load Balancer.</li>
+          <li>Load Balancer chọn node healthy theo round robin.</li>
+          <li>Node lỗi bị bỏ qua cho tới khi phục hồi.</li>
+        </ol>
+      </div>
+    </aside>
+  </div>
+</section>

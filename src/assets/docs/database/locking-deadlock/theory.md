@@ -1,4 +1,4 @@
-# Locking & Deadlock trong Database: từ cơ bản đến tư duy Middle/Senior
+# Locking & Deadlock trong Database
 
 Locking là cơ chế database dùng để bảo vệ dữ liệu khi nhiều transaction cùng đọc/ghi một lúc.
 
