@@ -1,0 +1,417 @@
+<section class="tx-demo" aria-labelledby="tx-demo-title">
+  <header class="hero">
+    <p class="eyebrow">Transaction & Concurrency Lab</p>
+    <h2 id="tx-demo-title">{{ activeLabInfo.label }}</h2>
+    <p>
+      Đọc bài toán, chọn chiến lược rồi chạy từng bước. Trạng thái được dựng lại từ đầu ở mỗi bước
+      để cùng một cấu hình luôn tạo ra cùng một kết quả.
+    </p>
+  </header>
+
+  <nav class="lab-tabs" *ngIf="visibleLabs.length > 1" aria-label="Các bài toán trong demo">
+    <button
+      *ngFor="let lab of visibleLabs; trackBy: trackByIndex"
+      type="button"
+      [class.active]="activeLab === lab.id"
+      [attr.aria-pressed]="activeLab === lab.id"
+      (click)="selectLab(lab.id)"
+    >
+      <span>Lab 0{{ visibleLabs.indexOf(lab) + 1 }}</span>
+      <strong>{{ lab.label }}</strong>
+      <small>{{ lab.description }}</small>
+    </button>
+  </nav>
+
+  <section class="case-brief">
+    <div class="case-main">
+      <div class="case-kicker">Bài toán 0{{ scenarioNumber }}</div>
+      <h3>{{ activeLabInfo.caseTitle }}</h3>
+      <p>{{ activeLabInfo.context }}</p>
+
+      <div class="fact-row">
+        <div *ngFor="let fact of labFacts; trackBy: trackByIndex">
+          <span>{{ fact.label }}</span>
+          <strong>{{ fact.value }}</strong>
+        </div>
+      </div>
+    </div>
+
+    <div class="case-analysis">
+      <div>
+        <span>Hiện tượng</span>
+        <p>{{ activeLabInfo.symptom }}</p>
+      </div>
+      <div>
+        <span>Cần xác định</span>
+        <p>{{ activeLabInfo.question }}</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="strategy">
+    <div>
+      <span>01</span>
+      <strong>Chọn điều kiện mô phỏng</strong>
+    </div>
+
+    <div class="segmented" *ngIf="activeLab === 'boundary'">
+      <button
+        type="button"
+        [class.active]="boundaryMode === 'failure'"
+        (click)="setBoundaryMode('failure')"
+      >
+        Không đủ tồn · Rollback
+      </button>
+      <button
+        type="button"
+        [class.active]="boundaryMode === 'success'"
+        (click)="setBoundaryMode('success')"
+      >
+        Đủ tồn · Commit
+      </button>
+    </div>
+
+    <div class="segmented" *ngIf="activeLab === 'lost-update'">
+      <button type="button" [class.active]="raceMode === 'unsafe'" (click)="setRaceMode('unsafe')">
+        Read–Modify–Write
+      </button>
+      <button type="button" [class.active]="raceMode === 'atomic'" (click)="setRaceMode('atomic')">
+        Atomic Update
+      </button>
+    </div>
+
+    <div class="segmented" *ngIf="activeLab === 'deadlock'">
+      <button
+        type="button"
+        [class.active]="lockMode === 'inconsistent'"
+        (click)="setLockMode('inconsistent')"
+      >
+        Thứ tự lock ngược nhau
+      </button>
+      <button
+        type="button"
+        [class.active]="lockMode === 'consistent'"
+        (click)="setLockMode('consistent')"
+      >
+        Thứ tự lock nhất quán
+      </button>
+    </div>
+
+    <div class="segmented" *ngIf="activeLab === 'outbox'">
+      <button
+        type="button"
+        [class.active]="outboxMode === 'direct'"
+        (click)="setOutboxMode('direct')"
+      >
+        Commit rồi publish trực tiếp
+      </button>
+      <button
+        type="button"
+        [class.active]="outboxMode === 'outbox'"
+        (click)="setOutboxMode('outbox')"
+      >
+        Transactional Outbox
+      </button>
+    </div>
+  </section>
+
+  <section class="simulation">
+    <div class="section-heading">
+      <div>
+        <span>02</span>
+        <strong>Theo dõi transaction theo từng bước</strong>
+      </div>
+      <b>Bước {{ currentStepIndex + 1 }} / {{ steps.length }}</b>
+    </div>
+
+    <div class="progress"><div [style.width.%]="progressPercent"></div></div>
+
+    <div class="step-bar">
+      <div class="step-copy">
+        <span>{{ currentStep ? 'Bước đang chạy' : 'Trước khi chạy' }}</span>
+        <h3>{{ currentStep?.title || 'Dự đoán kết quả trước khi mô phỏng' }}</h3>
+        <p>
+          {{
+            currentStep?.detail ||
+              'Dùng “Bước tiếp theo” để quan sát database thay đổi trạng thái và xác định failure window.'
+          }}
+        </p>
+      </div>
+
+      <div class="playback">
+        <div class="playback-buttons">
+          <button
+            type="button"
+            (click)="previousStep()"
+            [disabled]="currentStepIndex < 0 || isPlaying"
+          >
+            Quay lại
+          </button>
+          <button type="button" class="primary" (click)="nextStep()" [disabled]="isPlaying">
+            {{ currentStepIndex >= steps.length - 1 ? 'Chạy lại' : 'Bước tiếp theo' }}
+          </button>
+          <button type="button" (click)="togglePlay()">
+            {{ isPlaying ? 'Tạm dừng' : 'Tự chạy' }}
+          </button>
+        </div>
+        <div class="speed">
+          <span>Tốc độ</span>
+          <button type="button" [class.active]="speedMs === 1500" (click)="setSpeed(1500)">
+            0.5×
+          </button>
+          <button type="button" [class.active]="speedMs === 1000" (click)="setSpeed(1000)">
+            1×
+          </button>
+          <button type="button" [class.active]="speedMs === 550" (click)="setSpeed(550)">2×</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="stage" [class.deadlock-stage]="activeLab === 'deadlock'" [ngSwitch]="activeLab">
+      <ng-container *ngSwitchCase="'boundary'">
+        <div class="tx-status" [class.active]="isActive('transaction')">
+          <span>Transaction boundary</span>
+          <strong>{{ transactionState }}</strong>
+        </div>
+
+        <div class="record-grid">
+          <div
+            class="record"
+            [class.active]="isActive('order')"
+            [class.committed]="orderState === 'committed'"
+            [class.rolled-back]="orderState === 'rolled-back'"
+          >
+            <span>Orders</span>
+            <strong>Order #1001</strong>
+            <small>{{ stateLabel(orderState) }}</small>
+          </div>
+          <div
+            class="record"
+            [class.active]="isActive('items')"
+            [class.committed]="itemState === 'committed'"
+            [class.rolled-back]="itemState === 'rolled-back'"
+          >
+            <span>OrderItems</span>
+            <strong>Product #20 × 1</strong>
+            <small>{{ stateLabel(itemState) }}</small>
+          </div>
+          <div class="record" [class.active]="isActive('stock')">
+            <span>Products</span>
+            <strong>Stock = {{ stock }}</strong>
+            <small>{{
+              boundaryMode === 'failure' && currentStepIndex >= 3
+                ? 'Không đủ tồn để update'
+                : 'Conditional update'
+            }}</small>
+          </div>
+          <div
+            class="record"
+            [class.active]="isActive('movement')"
+            [class.committed]="movementState === 'committed'"
+          >
+            <span>StockTransactions</span>
+            <strong>Quantity = -1</strong>
+            <small>{{ stateLabel(movementState) }}</small>
+          </div>
+        </div>
+      </ng-container>
+
+      <ng-container *ngSwitchCase="'lost-update'">
+        <div class="race-layout">
+          <div class="lane" [class.active]="isActive('lane-a')">
+            <span>Request A · mua 2</span>
+            <strong>{{ laneAState }}</strong>
+            <small *ngIf="stockARead !== null">Snapshot đã đọc: {{ stockARead }}</small>
+          </div>
+
+          <div class="shared-value" [class.active]="isActive('stock')" [class.danger]="raceBroken">
+            <span>Products.StockQuantity</span>
+            <strong>{{ stock }}</strong>
+            <small>Kết quả đúng sau cả hai request: 5</small>
+          </div>
+
+          <div class="lane" [class.active]="isActive('lane-b')">
+            <span>Request B · mua 3</span>
+            <strong>{{ laneBState }}</strong>
+            <small *ngIf="stockBRead !== null">Snapshot đã đọc: {{ stockBRead }}</small>
+          </div>
+        </div>
+      </ng-container>
+
+      <ng-container *ngSwitchCase="'deadlock'">
+        <div class="deadlock-simulator">
+          <div class="scene-key">
+            <div class="actor-key actor-a">
+              <i></i>
+              <span>
+                <b>Transaction A</b>
+                Lock: Order #1 → Order #2
+              </span>
+            </div>
+            <strong>
+              {{ lockMode === 'inconsistent' ? 'Lock ngược thứ tự' : 'Lock theo cùng thứ tự' }}
+            </strong>
+            <div class="actor-key actor-b">
+              <i></i>
+              <span>
+                <b>Transaction B</b>
+                Lock:
+                {{ lockMode === 'inconsistent' ? 'Order #2 → Order #1' : 'Order #1 → Order #2' }}
+              </span>
+            </div>
+          </div>
+
+          <div class="svg-stage" [class.cycle-active]="showDeadlockCycle">
+            <svg
+              viewBox="0 0 1000 300"
+              role="img"
+              aria-label="Mô phỏng hai transaction lấy và chờ exclusive lock"
+            >
+              <defs>
+                <marker
+                  id="wait-arrow-a"
+                  markerWidth="8"
+                  markerHeight="8"
+                  refX="7"
+                  refY="4"
+                  orient="auto"
+                >
+                  <path d="M0,0 L8,4 L0,8 Z" class="arrow-a"></path>
+                </marker>
+                <marker
+                  id="wait-arrow-b"
+                  markerWidth="8"
+                  markerHeight="8"
+                  refX="7"
+                  refY="4"
+                  orient="auto"
+                >
+                  <path d="M0,0 L8,4 L0,8 Z" class="arrow-b"></path>
+                </marker>
+              </defs>
+
+              <path class="lane-guide" d="M60 78 H940"></path>
+              <path class="lane-guide" d="M60 222 H940"></path>
+
+              <g
+                class="resource-node"
+                [class.owner-a]="order1Owner === 'A'"
+                [class.owner-b]="order1Owner === 'B'"
+              >
+                <rect x="420" y="34" width="160" height="88" rx="12"></rect>
+                <text class="resource-type" x="500" y="58">RESOURCE</text>
+                <text class="resource-name" x="500" y="83">Order #1</text>
+                <text class="resource-owner" x="500" y="104">
+                  {{ order1Owner ? 'Chủ lock · ' + order1Owner : 'Chưa bị khóa' }}
+                </text>
+              </g>
+
+              <g
+                class="resource-node"
+                [class.owner-a]="order2Owner === 'A'"
+                [class.owner-b]="order2Owner === 'B'"
+              >
+                <rect x="420" y="178" width="160" height="88" rx="12"></rect>
+                <text class="resource-type" x="500" y="202">RESOURCE</text>
+                <text class="resource-name" x="500" y="227">Order #2</text>
+                <text class="resource-owner" x="500" y="248">
+                  {{ order2Owner ? 'Chủ lock · ' + order2Owner : 'Chưa bị khóa' }}
+                </text>
+              </g>
+
+              <path
+                *ngIf="showAWait"
+                class="wait-path wait-path-a"
+                d="M382 222 H410"
+                marker-end="url(#wait-arrow-a)"
+              ></path>
+
+              <path
+                *ngIf="showBWait"
+                class="wait-path wait-path-b"
+                d="M618 78 H590"
+                marker-end="url(#wait-arrow-b)"
+              ></path>
+
+              <g
+                #transactionAActor
+                class="transaction-actor actor-a"
+                transform="translate(130 78)"
+                [class.waiting]="showAWait"
+              >
+                <circle r="28"></circle>
+                <text y="5">A</text>
+              </g>
+
+              <g
+                #transactionBActor
+                class="transaction-actor actor-b"
+                transform="translate(870 222)"
+                [class.waiting]="showBWait"
+                [class.aborted]="currentStepIndex === 4 && lockMode === 'inconsistent'"
+              >
+                <circle r="28"></circle>
+                <text y="5">B</text>
+              </g>
+
+              <g *ngIf="showDeadlockCycle" class="cycle-badge">
+                <circle cx="500" cy="150" r="37"></circle>
+                <circle class="cycle-ring" cx="500" cy="150" r="48"></circle>
+                <text x="500" y="147">WAIT-FOR</text>
+                <text class="cycle-title" x="500" y="164">CYCLE</text>
+              </g>
+
+              <g
+                *ngIf="currentStepIndex >= 5 && lockMode === 'inconsistent'"
+                class="resolved-badge"
+              >
+                <rect x="405" y="132" width="190" height="36" rx="18"></rect>
+                <text x="500" y="154">B rollback · A tiếp tục</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <div class="deadlock-alert" *ngIf="deadlockDetected && currentStepIndex < 5">
+          <span>Chu trình chờ</span>
+          <strong>A chờ lock của B → B chờ lock của A → Deadlock</strong>
+        </div>
+      </ng-container>
+
+      <ng-container *ngSwitchCase="'outbox'">
+        <app-outbox-flow-demo
+          [mode]="outboxMode"
+          [stepIndex]="currentStepIndex"
+          [speedMs]="speedMs"
+          [orderState]="stateLabel(businessOrderState)"
+          [outboxState]="outboxStatusLabel"
+          [eventState]="eventState"
+          [processState]="processState"
+          [deliveryCount]="deliveryCount"
+          [consumerState]="consumerState"
+        ></app-outbox-flow-demo>
+      </ng-container>
+    </div>
+
+    <app-step-history [entries]="executedStepLog" [totalSteps]="steps.length"></app-step-history>
+  </section>
+
+  <section
+    class="verdict"
+    [class.verdict-final]="currentStepIndex === steps.length - 1"
+    aria-live="polite"
+  >
+    <div>
+      <span>03</span>
+      <strong>Kết quả phân tích</strong>
+    </div>
+    <h3>{{ verdictTitle }}</h3>
+    <p>
+      {{
+        currentStepIndex === steps.length - 1
+          ? verdictDetail
+          : 'Chạy hết timeline để xem kết luận và đối chiếu với dự đoán ban đầu.'
+      }}
+    </p>
+  </section>
+</section>

@@ -1,4 +1,4 @@
-# 02. Boundary và kiến trúc feature
+# Boundary và kiến trúc feature
 
 Boundary là đường ranh giữa các phần code. Boundary tốt giúp thay đổi một phần mà ít ảnh hưởng phần khác. Boundary kém làm mọi thứ dính nhau: sửa UI vỡ API, sửa permission vỡ form, sửa cache vỡ table.
 

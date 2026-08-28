@@ -1,4 +1,4 @@
-# 03. Component design production
+# Component design production
 
 Component là nơi frontend dễ phình nhất. Ban đầu nó chỉ render UI, sau đó thêm API, thêm form, thêm permission, thêm loading, thêm modal, thêm mapping. Một thời gian sau component thành nơi chứa mọi thứ.
 

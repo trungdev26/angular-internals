@@ -1,1495 +1,586 @@
-# Execution Plan trong Database
+# Execution Plans
 
-Execution Plan là bản mô tả cách database dự định hoặc đã thực sự chạy một câu SQL.
+Execution plan là cấu trúc mô tả cách database dự định thực hiện một câu SQL. Plan cho biết dữ liệu được đọc bằng access path nào, các relation được join theo chiến lược nào, row được lọc ở đâu và operator nào phải sort, aggregate hoặc tạo dữ liệu tạm.
 
-Nếu SQL là câu hỏi mình gửi cho database, thì execution plan là câu trả lời cho câu hỏi:
+Câu SQL mô tả kết quả cần nhận. Optimizer chịu trách nhiệm tìm một phương án thực thi có estimated cost thấp trong những phương án mà nó có thể xây dựng.
 
-```text
-Database sẽ lấy dữ liệu bằng cách nào?
-Đọc bảng nào trước?
-Dùng index nào?
-Join kiểu gì?
-Sort ở đâu?
-Ước lượng bao nhiêu dòng?
-Tốn chi phí ở bước nào?
-```
+Execution plan không tự trả lời query tốt hay xấu. Nó cung cấp bằng chứng để đối chiếu quyết định của optimizer với số row, phân bố dữ liệu, index và workload thực tế.
 
-Execution Plan là kỹ năng rất quan trọng để lên middle/senior backend, vì nó giúp mình không tối ưu bằng cảm giác.
+## Query optimizer
 
----
+Query optimizer là thành phần lựa chọn execution plan. Quá trình tối ưu thường gồm:
 
-## 1. Vì sao backend developer cần học execution plan?
+1. Phân tích cú pháp và xác định object được tham chiếu.
+2. Biến đổi query thành biểu diễn quan hệ.
+3. Tạo các access path và join order có thể sử dụng.
+4. Ước lượng cardinality của từng bước.
+5. Ước lượng CPU, I/O, memory và chi phí truyền row.
+6. Chọn plan có estimated cost thấp trong phạm vi tìm kiếm.
 
-Khi một API chậm, nguyên nhân có thể nằm ở nhiều chỗ:
+Optimizer không thử mọi plan có thể tồn tại. Số join order và operator combination tăng rất nhanh khi query phức tạp, nên optimizer phải giới hạn thời gian và không gian tìm kiếm.
 
-- Network
-- Application code
-- N+1 query
-- Query thiếu index
-- Index có nhưng sai thứ tự cột
-- Statistics cũ
-- Parameter sniffing
-- Lock/blocking
-- Query trả quá nhiều dòng
-- Report thiết kế sai hướng
+Plan được chọn là phương án tốt nhất theo thông tin optimizer có tại thời điểm tối ưu, không phải phương án tốt tuyệt đối cho mọi dữ liệu và mọi lần chạy.
 
-Nếu không đọc plan, mình dễ sửa kiểu đoán:
+## Cấu trúc cây
+
+Execution plan thường được biểu diễn bằng cây operator:
 
 ```text
-Thêm đại một index.
-Rewrite query theo cảm giác.
-Tăng timeout.
-Cache tạm.
-Đổ lỗi database chậm.
+Result
+└─ Sort
+   └─ Join
+      ├─ Scan orders
+      └─ Lookup customers
 ```
 
-Senior không dừng ở "query này chậm". Senior hỏi:
+Leaf operator đọc dữ liệu từ table hoặc index. Operator phía trên nhận row từ child, biến đổi chúng và chuyển kết quả cho parent.
 
-```text
-Nó chậm ở operator nào?
-Ước lượng row có sai không?
-Nó scan vì thiếu index hay vì trả quá nhiều dữ liệu?
-Có key lookup lặp quá nhiều không?
-Sort/hash có spill không?
-Index mới có đáng với chi phí write không?
-```
-
----
-
-## 2. Execution Plan là gì?
-
-Một câu SQL khai báo mình muốn kết quả gì, không nói database phải làm từng bước thế nào.
-
-Ví dụ:
-
-```sql
-SELECT Id, CustomerId, TotalAmount
-FROM Orders
-WHERE CustomerId = @customerId
-ORDER BY CreatedAt DESC;
-```
-
-Database optimizer sẽ chọn cách chạy:
-
-```text
-1. Dùng index nào để tìm Orders?
-2. Có cần đọc bảng chính không?
-3. Có cần sort không?
-4. Có cần lookup thêm cột không?
-5. Trả dữ liệu theo thứ tự nào?
-```
-
-Execution plan là kết quả của quá trình optimizer chọn kế hoạch đó.
-
----
-
-## 3. Estimated Plan và Actual Plan
-
-### 3.1. Estimated Execution Plan
-
-Estimated plan là plan database dự đoán sẽ dùng, chưa chạy query thật.
-
-Nó dựa vào:
-
-- Statistics
-- Index hiện có
-- Constraint
-- Cardinality estimation
-- Parameter hoặc giá trị giả định
-
-Ưu điểm:
-
-- Không cần chạy query nặng
-- Hữu ích khi query có thể ảnh hưởng production
-
-Nhược điểm:
-
-- Chỉ là dự đoán
-- Không có số dòng thực tế
-- Không thấy runtime thật
-
-### 3.2. Actual Execution Plan
-
-Actual plan là plan sau khi query chạy thật.
-
-Nó cho biết:
-
-- Actual rows
-- Actual executions
-- Runtime operator
-- Có spill không
-- Có warning không
-- Chênh lệch estimate vs actual
-
-Khi debug query chậm, actual plan thường có giá trị hơn.
-
-```text
-Estimated plan cho biết database nghĩ gì.
-Actual plan cho biết chuyện gì thật sự xảy ra.
-```
-
----
-
-## 4. Optimizer hoạt động như thế nào?
-
-Database optimizer cố chọn plan có chi phí thấp nhất theo mô hình nội bộ.
-
-Nó không thử mọi plan có thể trong mọi trường hợp, vì số khả năng quá lớn. Nó dùng metadata và statistics để ước lượng.
-
-Optimizer quan tâm:
-
-- Bảng có bao nhiêu dòng
-- Index nào có sẵn
-- Điều kiện filter chọn lọc ra sao
-- Join giữa bảng nào
-- Sort/group cần bao nhiêu dữ liệu
-- Dữ liệu phân bố thế nào
-- Query cần trả bao nhiêu cột
-
-Điểm quan trọng:
-
-```text
-Optimizer chọn plan dựa trên thông tin nó có.
-Nếu statistics sai hoặc query viết khó tối ưu, plan có thể sai.
-```
-
----
-
-## 5. Cost không phải thời gian tuyệt đối
-
-Trong nhiều database, execution plan có chỉ số cost.
-
-Nhưng cost không đơn giản là:
-
-```text
-Cost 10 = chạy 10ms
-Cost 100 = chạy 100ms
-```
-
-Cost thường là điểm ước lượng tương đối dựa trên CPU, IO, row count, operator và mô hình nội bộ.
-
-Dùng cost để:
-
-- Nhìn operator nào đắt tương đối trong plan
-- So sánh hai plan cùng môi trường
-- Định hướng bước cần điều tra
-
-Không nên dùng cost như thời gian tuyệt đối.
-
-```text
-Plan cost thấp nhưng vẫn chậm nếu bị blocking, IO nghẽn, memory pressure hoặc trả dữ liệu quá lớn qua network.
-```
-
----
-
-## 6. Table Scan / Sequential Scan
-
-Table scan nghĩa là database đọc toàn bộ bảng hoặc phần lớn bảng.
-
-Ví dụ:
-
-```sql
-SELECT *
-FROM Orders
-WHERE CustomerId = 10;
-```
-
-Nếu không có index trên `CustomerId`, database có thể phải quét toàn bảng.
-
-Table scan không phải lúc nào cũng xấu.
-
-Nó có thể hợp lý khi:
-
-- Bảng nhỏ
-- Query trả phần lớn bảng
-- Index không chọn lọc
-- Đọc toàn bảng rẻ hơn seek + lookup quá nhiều lần
-
-Nó thường xấu khi:
-
-- Bảng lớn
-- Query chỉ cần vài dòng
-- API chạy thường xuyên
-- Scan làm giữ lock/IO lâu
-
-Tư duy đúng:
-
-```text
-Không phải thấy scan là thêm index ngay.
-Phải hỏi query cần bao nhiêu phần trăm dữ liệu và scan đang tốn bao nhiêu.
-```
-
----
-
-## 7. Index Seek
-
-Index seek nghĩa là database dùng cấu trúc index để nhảy đến vùng dữ liệu cần tìm.
-
-Ví dụ:
-
-```sql
-CREATE INDEX IX_Orders_CustomerId
-ON Orders(CustomerId);
-```
-
-Query:
-
-```sql
-SELECT Id, CreatedAt, TotalAmount
-FROM Orders
-WHERE CustomerId = @customerId;
-```
-
-Nếu `CustomerId` có selectivity tốt, database có thể dùng index seek.
-
-Index seek thường tốt khi:
-
-- Filter chọn ít dòng
-- Predicate SARGable
-- Index có cột filter đúng thứ tự
-- Query không cần lookup quá nhiều
-
-Nhưng index seek không đảm bảo query nhanh tuyệt đối.
-
-Ví dụ:
-
-```text
-Index seek tìm ra 2 triệu dòng.
-Sau đó key lookup 2 triệu lần.
-Kết quả vẫn rất chậm.
-```
-
----
-
-## 8. Index Scan
-
-Index scan nghĩa là database quét index thay vì quét bảng.
-
-Index scan có thể nhanh hơn table scan nếu index nhỏ hơn bảng hoặc đã chứa đủ cột cần trả.
-
-Ví dụ:
-
-```sql
-SELECT CustomerId
-FROM Orders;
-```
-
-Nếu có index trên `CustomerId`, database có thể scan index đó thay vì scan cả bảng.
-
-Index scan không tự động xấu. Nhưng nếu query đáng lẽ chỉ cần vài dòng mà lại index scan nhiều triệu dòng, cần xem lại:
-
-- Predicate có SARGable không?
-- Có function bọc quanh cột không?
-- Có implicit conversion không?
-- Index có đúng thứ tự cột không?
-- Statistics có sai không?
-
----
-
-## 9. Key Lookup / Bookmark Lookup
-
-Key lookup xảy ra khi database dùng nonclustered index để tìm dòng, rồi phải quay lại bảng chính hoặc clustered index để lấy thêm cột còn thiếu.
-
-Ví dụ index:
-
-```sql
-CREATE INDEX IX_Orders_CustomerId
-ON Orders(CustomerId);
-```
-
-Query:
-
-```sql
-SELECT Id, CustomerId, TotalAmount, Status, CreatedAt
-FROM Orders
-WHERE CustomerId = @customerId;
-```
-
-Index có `CustomerId`, nhưng không có `TotalAmount`, `Status`, `CreatedAt`. Database có thể:
-
-```text
-Index Seek IX_Orders_CustomerId
--> Key Lookup về bảng Orders cho từng dòng
-```
-
-Key lookup ổn nếu chỉ vài dòng.
-
-Key lookup rất tệ nếu lặp hàng chục nghìn hoặc hàng triệu lần.
-
-Cách xử lý:
-
-- Chỉ select cột cần dùng
-- Tạo covering index bằng `INCLUDE`
-- Đổi composite index đúng query
-- Chấp nhận scan nếu query trả phần lớn bảng
-
-Ví dụ:
-
-```sql
-CREATE INDEX IX_Orders_Customer_Created
-ON Orders(CustomerId, CreatedAt DESC)
-INCLUDE (TotalAmount, Status);
-```
-
----
-
-## 10. Nested Loop Join
-
-Nested loop join thường chạy theo kiểu:
-
-```text
-Với mỗi dòng bên ngoài,
-đi tìm dòng tương ứng ở bảng bên trong.
-```
-
-Ví dụ:
-
-```sql
-SELECT o.Id, c.Name
-FROM Orders o
-JOIN Customers c ON c.Id = o.CustomerId
-WHERE o.CreatedAt >= @fromDate;
-```
-
-Nested loop tốt khi:
-
-- Bảng ngoài trả ít dòng
-- Bảng trong có index tốt theo join key
-- Lookup mỗi dòng rẻ
-
-Nested loop tệ khi:
-
-- Bảng ngoài trả rất nhiều dòng
-- Bảng trong không có index
-- Lookup lặp quá nhiều
-
-Dấu hiệu cần chú ý:
-
-```text
-Nested Loop + Key Lookup chạy hàng trăm nghìn lần.
-```
-
----
-
-## 11. Hash Join
-
-Hash join thường dùng khi join lượng dữ liệu lớn.
-
-Ý tưởng:
-
-```text
-Build hash table từ một input.
-Probe input còn lại vào hash table.
-```
-
-Hash join tốt khi:
-
-- Join nhiều dòng
-- Không có index phù hợp cho nested loop
-- Equality join
-
-Hash join có thể tốn:
-
-- Memory
-- CPU
-- TempDB/disk nếu spill
-
-Nếu plan có hash join và spill warning, cần kiểm tra:
-
-- Estimated rows có sai quá nhiều không?
-- Statistics có cũ không?
-- Query có lọc được sớm hơn không?
-- Có index hỗ trợ join/filter không?
-- Memory grant có thiếu không?
-
----
-
-## 12. Merge Join
-
-Merge join cần hai input đã được sắp xếp theo join key.
-
-Nó tốt khi:
-
-- Hai phía đều lớn
-- Dữ liệu đã sorted nhờ index
-- Join theo range/equality phù hợp
-
-Nếu chưa sorted, database có thể phải sort trước, làm tăng chi phí.
-
-Merge join thường xuất hiện trong query lớn, report hoặc join trên các key đã có index đúng thứ tự.
-
----
-
-## 13. Sort operator
-
-Sort operator xuất hiện khi database cần sắp xếp dữ liệu mà không thể tận dụng index.
-
-Ví dụ:
-
-```sql
-SELECT Id, CreatedAt
-FROM Orders
-WHERE TenantId = @tenantId
-ORDER BY CreatedAt DESC;
-```
-
-Nếu index chỉ có `TenantId`:
-
-```sql
-CREATE INDEX IX_Orders_Tenant
-ON Orders(TenantId);
-```
-
-Database có thể lọc theo tenant rồi sort lại theo `CreatedAt`.
-
-Index tốt hơn:
-
-```sql
-CREATE INDEX IX_Orders_Tenant_Created
-ON Orders(TenantId, CreatedAt DESC);
-```
-
-Sort đáng chú ý khi:
-
-- Sort nhiều dòng
-- Có spill ra disk
-- Nằm trước pagination
-- Nằm trong report/group lớn
-
----
-
-## 14. Aggregate operator
-
-Aggregate dùng cho `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY`.
-
-Ví dụ:
-
-```sql
-SELECT ShopId, SUM(TotalAmount)
-FROM Invoices
-WHERE TenantId = @tenantId
-  AND InvoiceDate >= @fromDate
-  AND InvoiceDate < @toDate
-GROUP BY ShopId;
-```
-
-Plan có thể dùng:
-
-- Stream aggregate: tốt khi input đã sorted theo group key
-- Hash aggregate: tốt cho input lớn nhưng cần memory
-
-Nếu aggregate nặng:
-
-- Có lọc đủ sớm không?
-- Có index theo filter/date/group không?
-- Có cần bảng tổng hợp không?
-- Có đang report trên bảng giao dịch quá lớn không?
-
-Không phải report chậm nào cũng sửa bằng index. Nhiều case cần read model hoặc bảng tổng hợp.
-
----
-
-## 15. Filter, Predicate và Residual Predicate
-
-Plan thường có predicate để lọc dữ liệu.
-
-Cần phân biệt:
-
-```text
-Seek predicate: điều kiện dùng được để seek vào index.
-Residual predicate: điều kiện lọc sau khi đã đọc dữ liệu.
-```
-
-Ví dụ index `(TenantId, CreatedAt)`:
-
-```sql
-WHERE TenantId = @tenantId
-  AND CreatedAt >= @fromDate
-  AND Status = 'Paid'
-```
-
-Database có thể seek tốt theo `TenantId`, `CreatedAt`, rồi filter `Status` sau nếu `Status` không nằm đúng vị trí hoặc không có trong index.
-
-Residual predicate không luôn xấu, nhưng nếu nó loại bỏ rất nhiều dòng sau khi đã đọc quá nhiều, cần xem lại index.
-
----
-
-## 16. SARGable là gì?
-
-SARGable nghĩa là điều kiện có thể tận dụng index hiệu quả.
-
-Tốt:
-
-```sql
-WHERE CreatedAt >= '2026-01-01'
-  AND CreatedAt < '2026-02-01'
-```
-
-Kém:
-
-```sql
-WHERE YEAR(CreatedAt) = 2026
-```
-
-Vì function bọc quanh cột làm database khó dùng index seek theo giá trị gốc.
-
-Ví dụ khác:
-
-```sql
-WHERE Name LIKE 'Nguyen%'
-```
-
-Thường dùng B-Tree index tốt hơn:
-
-```sql
-WHERE Name LIKE '%Nguyen%'
-```
-
-Leading wildcard thường không seek tốt bằng B-Tree.
-
-Câu nhớ:
-
-```text
-Đừng bắt database biến đổi từng dòng rồi mới so sánh nếu mình có thể viết điều kiện theo range/index-friendly.
-```
-
----
-
-## 17. Implicit conversion
-
-Implicit conversion xảy ra khi database phải tự ép kiểu để so sánh.
-
-Ví dụ cột `PhoneNumber` là string:
-
-```sql
-WHERE PhoneNumber = 84901234567
-```
-
-Database có thể phải convert cột hoặc parameter, làm index khó dùng.
-
-Nên truyền đúng kiểu:
-
-```sql
-WHERE PhoneNumber = '84901234567'
-```
-
-Trong plan, implicit conversion thường là dấu hiệu nhỏ nhưng gây hậu quả lớn:
-
-- Scan thay vì seek
-- Estimate sai
-- CPU cao
-- Query chậm bất thường
-
-Backend developer cần để ý kiểu dữ liệu parameter từ ORM/API.
-
----
-
-## 18. Estimated Rows vs Actual Rows
-
-Đây là một trong những chỉ số quan trọng nhất khi đọc actual plan.
-
-Ví dụ:
-
-```text
-Estimated rows: 10
-Actual rows: 500000
-```
-
-Database nghĩ chỉ có 10 dòng nên chọn nested loop + key lookup. Thực tế có 500.000 dòng nên plan trở nên rất tệ.
-
-Nguyên nhân:
-
-- Statistics cũ
-- Dữ liệu phân bố lệch
-- Parameter sniffing
-- Predicate phức tạp
-- Function/implicit conversion
-- Correlation giữa nhiều cột mà optimizer ước lượng kém
-
-Khi estimate lệch mạnh, đừng chỉ nhìn operator. Hãy hỏi:
-
-```text
-Vì sao optimizer đoán sai số dòng?
-```
-
----
-
-## 19. Cardinality và selectivity
-
-Cardinality là số lượng dòng.
-
-Selectivity là độ chọn lọc của điều kiện.
-
-Ví dụ:
-
-```text
-Email = 'a@b.com' -> selectivity cao
-IsDeleted = 0 -> selectivity thấp nếu đa số dòng chưa xóa
-Status = 'Pending' -> tùy phân bố dữ liệu
-TenantId = 1 -> có thể rất nhiều hoặc rất ít tùy tenant
-```
-
-Optimizer cần ước lượng cardinality để chọn plan.
-
-Nếu điều kiện chọn ít dòng:
-
-- Index seek thường tốt
-- Nested loop có thể tốt
-
-Nếu điều kiện chọn nhiều dòng:
-
-- Scan có thể hợp lý
-- Hash join có thể tốt hơn
-- Key lookup nhiều lần có thể tệ
-
----
-
-## 20. Statistics
-
-Statistics mô tả phân bố dữ liệu trong bảng/index để optimizer ước lượng số dòng.
-
-Nếu statistics cũ hoặc không đủ chi tiết, plan có thể sai.
-
-Ví dụ:
-
-```text
-Hôm qua Pending có 1.000 dòng.
-Hôm nay import lỗi làm Pending thành 5.000.000 dòng.
-Statistics chưa cập nhật.
-Optimizer vẫn nghĩ Pending ít.
-```
-
-Hậu quả:
-
-- Chọn nested loop thay vì hash join
-- Chọn key lookup quá nhiều
-- Memory grant thiếu
-- Sort/hash spill
-
-Việc tuning query không chỉ là tạo index. Đôi khi cần:
-
-- Update statistics
-- Kiểm tra auto update statistics
-- Kiểm tra histogram
-- Tách query cho data skew
-- Dùng filtered statistics/index nếu phù hợp
-
----
-
-## 21. Parameter sniffing
-
-Parameter sniffing xảy ra khi database compile plan dựa trên một giá trị parameter cụ thể, rồi tái dùng plan đó cho giá trị khác.
-
-Ví dụ:
-
-```sql
-WHERE TenantId = @tenantId
-```
-
-Tenant nhỏ:
-
-```text
-1.000 orders
-```
-
-Tenant lớn:
-
-```text
-50.000.000 orders
-```
-
-Plan tốt cho tenant nhỏ có thể rất tệ cho tenant lớn.
-
-Dấu hiệu:
-
-- Cùng query lúc nhanh lúc chậm
-- Clear plan cache hoặc recompile thì tạm hết
-- Một vài customer/tenant lớn gây chậm
-- Estimate rows lệch rất mạnh tùy parameter
-
-Hướng xử lý tùy database:
-
-- Update statistics
-- Tách query cho case lớn/nhỏ
-- Recompile có kiểm soát
-- Optimize for specific/unknown trong SQL Server khi thật sự hiểu
-- Filtered index/statistics
-- Thiết kế partition/read model nếu dữ liệu lệch quá lớn
-
-Không nên dùng hint mù chỉ vì thấy query nhanh hơn một lần.
-
----
-
-## 22. Memory Grant và Spill
-
-Một số operator cần memory:
-
-- Sort
-- Hash join
-- Hash aggregate
-
-Database cấp memory dựa trên estimated rows.
-
-Nếu estimate thấp hơn thực tế, memory không đủ và operator có thể spill ra disk/tempdb.
-
-Dấu hiệu:
-
-```text
-Sort spill
-Hash spill
-TempDB tăng cao
-Query chậm khi dữ liệu lớn
-```
-
-Cách điều tra:
-
-- Estimate vs actual rows có lệch không?
-- Sort/hash đang xử lý bao nhiêu dòng?
-- Có index giúp tránh sort không?
-- Có lọc sớm hơn được không?
-- Có cần chia report thành batch/read model không?
-
----
-
-## 23. Top, Limit và pagination
-
-Plan cho query có `TOP`, `LIMIT`, `OFFSET` có thể rất khác query thường.
-
-Ví dụ:
-
-```sql
-SELECT TOP 50 Id, CreatedAt
-FROM Orders
-WHERE TenantId = @tenantId
-ORDER BY CreatedAt DESC;
-```
-
-Index tốt:
-
-```sql
-CREATE INDEX IX_Orders_Tenant_Created
-ON Orders(TenantId, CreatedAt DESC);
-```
-
-Database có thể đọc 50 dòng đầu theo đúng thứ tự.
-
-Nhưng offset sâu:
-
-```sql
-ORDER BY CreatedAt DESC
-OFFSET 100000 ROWS FETCH NEXT 50 ROWS ONLY;
-```
-
-Database vẫn phải đi qua nhiều dòng trước khi lấy 50 dòng cần trả.
-
-Với dữ liệu lớn, cân nhắc keyset pagination:
-
-```sql
-WHERE TenantId = @tenantId
-  AND (CreatedAt < @lastCreatedAt OR (CreatedAt = @lastCreatedAt AND Id < @lastId))
-ORDER BY CreatedAt DESC, Id DESC;
-```
-
-Index:
-
-```sql
-CREATE INDEX IX_Orders_Tenant_Created_Id
-ON Orders(TenantId, CreatedAt DESC, Id DESC);
-```
-
----
-
-## 24. Missing Index Suggestion
-
-Một số database/tool gợi ý missing index.
-
-Không nên xem đó là mệnh lệnh.
-
-Missing index suggestion có thể hữu ích, nhưng thường thiếu ngữ cảnh:
-
-- Không biết write workload
-- Không biết index đã có gần giống
-- Không biết query khác bị ảnh hưởng
-- Có thể đề xuất nhiều index trùng nhau
-- Có thể thêm quá nhiều include columns
-- Không hiểu nghiệp vụ hot/cold path
-
-Trước khi tạo index theo suggestion, hỏi:
-
-```text
-Query này có quan trọng không?
-Chạy bao nhiêu lần mỗi phút?
-Index hiện có có thể sửa/thay vì thêm mới không?
-Index mới có trùng prefix với index khác không?
-Write cost tăng bao nhiêu?
-Plan sau khi thêm index có thật sự tốt không?
-```
-
----
-
-## 25. Query trả nhiều dữ liệu thì index không cứu hết
-
-Nếu query cần trả 5 triệu dòng, có index cũng không biến nó thành nhẹ.
-
-Ví dụ:
-
-```sql
-SELECT *
-FROM AuditLogs
-WHERE CreatedAt >= '2026-01-01';
-```
-
-Nếu điều kiện này trả 80% bảng, scan có thể hợp lý hơn seek.
-
-Vấn đề thật có thể là:
-
-- API không nên trả nhiều dữ liệu như vậy
-- Cần pagination
-- Cần export async
-- Cần archive dữ liệu cũ
-- Cần partition
-- Cần read replica
-- Cần bảng tổng hợp
-
-Senior biết khi nào tối ưu query và khi nào phải đổi thiết kế use case.
-
----
-
-## 26. SELECT * làm plan nặng hơn
-
-`SELECT *` làm database phải lấy mọi cột.
-
-Hậu quả:
-
-- Khó dùng covering index
-- Tăng key lookup
-- Tăng IO
-- Tăng network payload
-- Dễ kéo theo cột lớn như note/json/blob
-
-Ví dụ tốt hơn:
-
-```sql
-SELECT Id, OrderNo, Status, CreatedAt, TotalAmount
-FROM Orders
-WHERE CustomerId = @customerId;
-```
-
-Chỉ lấy cột màn hình/API thật sự cần.
-
-Trong backend, DTO rõ ràng không chỉ giúp code sạch, mà còn giúp query plan nhẹ hơn.
-
----
-
-## 27. N+1 query không nằm trong một plan duy nhất
-
-Execution plan giúp đọc từng query, nhưng N+1 thường là vấn đề ở application.
-
-Ví dụ:
-
-```text
-Load 100 orders
-Với mỗi order, query customer một lần
-=> 101 queries
-```
-
-Mỗi query customer có thể plan rất đẹp, nhưng tổng thể API vẫn chậm.
-
-Cần kết hợp:
-
-- Query log
-- APM/tracing
-- Count số query mỗi request
-- Include/join/batch load hợp lý
-
-Senior không chỉ đọc plan của một query, mà nhìn toàn bộ request path.
+Khi đọc plan, cần theo dõi ba luồng:
 
----
+- **Luồng row:** mỗi child tạo bao nhiêu row cho parent.
+- **Luồng dữ liệu:** operator phải đọc bao nhiêu page hoặc byte.
+- **Luồng công việc:** operator chạy một lần hay lặp lại nhiều lần.
 
-## 28. Plan cache
+Giao diện plan có thể vẽ root ở trên, dưới, trái hoặc phải. Hướng vẽ không quan trọng bằng quan hệ parent–child và số liệu trên từng operator.
 
-Database có thể cache execution plan để tái sử dụng.
+## Estimated plan và actual metrics
 
-Ưu điểm:
+### Estimated plan
 
-- Giảm chi phí compile query
-- Tăng tốc query lặp lại
+Estimated plan được tạo từ schema, index, statistics và cost model mà không cần hoàn thành toàn bộ query. Nó cho biết:
 
-Nhược điểm:
+- Access path optimizer dự định sử dụng.
+- Join order và join algorithm.
+- Estimated rows tại từng operator.
+- Estimated cost.
+- Predicate và ordering được áp dụng ở đâu.
 
-- Plan cũ có thể không còn phù hợp khi dữ liệu đổi
-- Parameter sniffing
-- Query dynamic tạo quá nhiều plan khác nhau
+Estimated plan phù hợp để kiểm tra query có khả năng tạo workload nguy hiểm trước khi chạy. Tuy nhiên, nó chưa chứng minh runtime thực tế.
 
-Ví dụ xấu:
+### Actual metrics
 
-```text
-SELECT * FROM Orders WHERE CustomerId = 1
-SELECT * FROM Orders WHERE CustomerId = 2
-SELECT * FROM Orders WHERE CustomerId = 3
-```
-
-Nếu app build SQL bằng cách nối string thay vì parameter, có thể làm plan cache phình và tăng rủi ro SQL injection.
-
-Nên dùng parameterized query.
-
----
-
-## 29. Lock và execution plan
-
-Plan không chỉ ảnh hưởng tốc độ đọc, mà còn ảnh hưởng lock.
-
-Ví dụ:
-
-```sql
-UPDATE Orders
-SET Status = 'Expired'
-WHERE Status = 'Pending'
-  AND ExpiredAt < @now;
-```
-
-Nếu thiếu index `(Status, ExpiredAt)`, database có thể scan nhiều dòng, giữ lock lâu và block request khác.
-
-Index phù hợp:
-
-```sql
-CREATE INDEX IX_Orders_Status_ExpiredAt
-ON Orders(Status, ExpiredAt);
-```
-
-Tư duy quan trọng:
-
-```text
-Plan tệ của UPDATE/DELETE có thể gây blocking production nặng hơn SELECT chậm.
-```
-
-Khi review query ghi, luôn xem điều kiện `WHERE` có index đủ tốt không.
-
----
-
-## 30. Cách đọc execution plan theo thứ tự
-
-Một checklist thực dụng:
-
-1. Query trả bao nhiêu dòng?
-2. Operator nào chiếm cost/time nhiều nhất?
-3. Có table scan/large index scan không?
-4. Scan có hợp lý không hay đáng lẽ phải seek?
-5. Có key lookup lặp nhiều không?
-6. Có sort/hash aggregate/hash join lớn không?
-7. Có spill warning không?
-8. Estimated rows và actual rows lệch bao nhiêu?
-9. Predicate có SARGable không?
-10. Có implicit conversion không?
-11. Join order có hợp lý không?
-12. Có missing index suggestion không, và suggestion có đáng tin không?
-13. Có parameter sniffing/data skew không?
-14. Có blocking/lock ngoài plan không?
-15. Query có đang trả quá nhiều dữ liệu so với nhu cầu API không?
-
-Đừng chỉ nhìn một operator. Plan là câu chuyện toàn bộ luồng dữ liệu.
-
----
-
-## 31. Case 1: API lịch sử đơn hàng theo khách bị chậm
-
-Query:
-
-```sql
-SELECT Id, OrderNo, Status, TotalAmount, CreatedAt
-FROM Orders
-WHERE CustomerId = @customerId
-ORDER BY CreatedAt DESC
-OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY;
-```
-
-Plan hiện tại:
-
-```text
-Table Scan Orders
-Sort CreatedAt DESC
-Return page
-```
-
-Vấn đề:
-
-- Không có index theo `CustomerId`
-- Sort nhiều dòng
-- Pagination dựa trên kết quả đã sort
-
-Index đề xuất:
-
-```sql
-CREATE INDEX IX_Orders_Customer_Created
-ON Orders(CustomerId, CreatedAt DESC)
-INCLUDE (OrderNo, Status, TotalAmount);
-```
-
-Plan kỳ vọng:
-
-```text
-Index Seek theo CustomerId
-Đọc theo CreatedAt DESC
-Không cần sort lớn
-Ít hoặc không cần key lookup
-```
-
-Nếu page rất sâu, cân nhắc keyset pagination.
-
----
-
-## 32. Case 2: Có index nhưng vẫn chậm vì key lookup
-
-Index hiện có:
-
-```sql
-CREATE INDEX IX_Orders_CustomerId
-ON Orders(CustomerId);
-```
-
-Query:
-
-```sql
-SELECT Id, OrderNo, Status, TotalAmount, CreatedAt
-FROM Orders
-WHERE CustomerId = @customerId;
-```
-
-Plan:
-
-```text
-Index Seek IX_Orders_CustomerId
-Key Lookup Orders x 200000
-```
-
-Vấn đề:
-
-- Seek có, nhưng trả quá nhiều dòng
-- Lookup lặp quá nhiều
-- Query cần nhiều cột không có trong index
-
-Hướng xử lý:
-
-- Nếu API thật sự cần nhiều dòng: pagination
-- Nếu chỉ cần list columns: covering index
-- Nếu query trả phần lớn orders của customer lớn: scan có thể hợp lý hơn
-- Nếu customer phân bố lệch: xem parameter sniffing
-
-Index có thể cân nhắc:
-
-```sql
-CREATE INDEX IX_Orders_Customer_Created
-ON Orders(CustomerId, CreatedAt DESC)
-INCLUDE (OrderNo, Status, TotalAmount);
-```
-
----
-
-## 33. Case 3: Query report chậm vì aggregate lớn
-
-Query:
-
-```sql
-SELECT ShopId, SUM(TotalAmount) AS Revenue
-FROM Invoices
-WHERE TenantId = @tenantId
-  AND InvoiceDate >= @fromDate
-  AND InvoiceDate < @toDate
-  AND Status = 'Paid'
-GROUP BY ShopId;
-```
-
-Plan:
-
-```text
-Index/Table Scan nhiều triệu dòng
-Hash Aggregate
-Hash spill
-```
-
-Index có thể giúp:
-
-```sql
-CREATE INDEX IX_Invoices_Tenant_Status_Date_Shop
-ON Invoices(TenantId, Status, InvoiceDate, ShopId)
-INCLUDE (TotalAmount);
-```
-
-Nhưng nếu report chạy trên dữ liệu rất lớn, index có thể vẫn chưa đủ.
-
-Hướng senior hơn:
-
-- Bảng doanh thu tổng hợp theo ngày/shop
-- Job cập nhật số liệu
-- Report async
-- Read replica
-- Partition theo ngày
-- Giới hạn khoảng thời gian export
-
----
-
-## 34. Case 4: Query không SARGable
-
-Query:
-
-```sql
-SELECT Id, CreatedAt
-FROM Orders
-WHERE CONVERT(date, CreatedAt) = @date;
-```
-
-Vấn đề:
-
-```text
-Function bọc quanh CreatedAt.
-Database khó seek theo index CreatedAt.
-```
-
-Viết lại:
-
-```sql
-SELECT Id, CreatedAt
-FROM Orders
-WHERE CreatedAt >= @startOfDay
-  AND CreatedAt < @nextDay;
-```
-
-Index:
-
-```sql
-CREATE INDEX IX_Orders_CreatedAt
-ON Orders(CreatedAt);
-```
-
-Đây là ví dụ kinh điển: không đổi nghiệp vụ, chỉ đổi cách viết predicate để optimizer dùng index tốt hơn.
-
----
-
-## 35. Case 5: Data skew và tenant lớn
-
-Query:
-
-```sql
-SELECT Id, OrderNo, CreatedAt
-FROM Orders
-WHERE TenantId = @tenantId
-  AND Status = 'Pending';
-```
-
-Dữ liệu:
-
-```text
-Tenant A: 1.000 orders
-Tenant B: 50.000.000 orders
-```
-
-Một plan không chắc tốt cho cả hai.
-
-Dấu hiệu:
-
-- Tenant nhỏ chạy nhanh
-- Tenant lớn timeout
-- Hoặc ngược lại
-- Actual rows lệch xa estimated rows
-
-Hướng xử lý:
+Actual metrics được thu thập khi query thật sự thực thi. Tùy hệ quản trị và công cụ, plan có thể bổ sung:
 
-- Index theo pattern tenant/status phù hợp
-- Tách path cho tenant lớn
-- Recompile có kiểm soát
-- Filtered index nếu status đặc biệt
-- Partition/read model nếu tenant lớn quá khác biệt
-- Không giả định dữ liệu phân bố đều
-
----
-
-## 36. Checklist tối ưu query chậm
-
-Khi gặp query chậm, đi theo thứ tự:
-
-1. Xác nhận query nào chậm, input nào chậm.
-2. Đo thời gian chạy thật và số dòng trả về.
-3. Lấy actual execution plan.
-4. So sánh estimated rows vs actual rows.
-5. Tìm scan/lookup/sort/hash/spill đáng nghi.
-6. Kiểm tra predicate có SARGable không.
-7. Kiểm tra implicit conversion.
-8. Kiểm tra index hiện có.
-9. Kiểm tra statistics.
-10. Kiểm tra parameter sniffing/data skew.
-11. Kiểm tra query có trả quá nhiều cột/dòng không.
-12. Đề xuất sửa query/index/schema/use case.
-13. Chạy lại plan sau khi sửa.
-14. Đo tác động đến write workload.
-15. Ghi lại lý do để review và rollback nếu cần.
-
----
-
-## 37. Checklist proposal index từ execution plan
-
-Một đề xuất index tốt nên có:
-
-- Query/API/report đang tối ưu
-- Plan hiện tại đang tệ ở đâu
-- Số dòng estimated vs actual nếu có
-- Index hiện có liên quan
-- Index đề xuất
-- Vì sao chọn thứ tự cột như vậy
-- Có dùng `INCLUDE` không, vì sao
-- Có giảm sort/lookup/scan không
-- Tác động đến insert/update/delete
-- Rủi ro index trùng
-- Cách verify sau deploy
-- Cách rollback nếu write latency tăng
-
-Ví dụ chưa đủ:
-
-```text
-Thêm index CreatedAt cho nhanh.
-```
-
-Ví dụ tốt hơn:
-
-```text
-API danh sách đơn theo tenant đang scan Orders và sort CreatedAt cho mỗi request.
-Actual plan đọc khoảng 1.2M rows để trả 50 rows.
-Đề xuất IX_Orders_Tenant_Created_Id (TenantId, CreatedAt DESC, Id DESC)
-INCLUDE (OrderNo, Status, TotalAmount) để phục vụ filter + order + list columns.
-Cần đo write overhead vì Orders là bảng ghi cao.
-```
+- Actual rows.
+- Số lần operator được gọi.
+- Thời gian thực thi.
+- Số page hoặc byte được đọc.
+- Memory đã dùng.
+- Dữ liệu tạm hoặc spill.
 
----
+Actual metrics có giá trị vì chúng cho phép so estimated rows với actual rows. Việc thu thập này thực thi query, vì vậy cần thận trọng với câu lệnh thay đổi dữ liệu hoặc query nặng trên môi trường đang hoạt động.
 
-## 38. Khi nào không nên tối ưu bằng index?
+## Cost
 
-Không nên thêm index nếu:
+Cost là đơn vị tương đối trong cost model của optimizer. Nó dùng để so sánh các phương án trong cùng quá trình tối ưu, không phải milliseconds và không phải cam kết latency.
 
-- Query hiếm khi chạy
-- Bảng nhỏ
-- Query trả phần lớn bảng
-- Bottleneck nằm ở N+1 query
-- API trả quá nhiều dữ liệu
-- Report cần read model/bảng tổng hợp
-- Index mới trùng index cũ
-- Write workload đang rất cao
-- Query chậm do blocking chứ không phải plan
-- Query chậm do network/render/export file
+Một operator có cost cao nhất chưa chắc là root cause duy nhất:
 
-Index là một cách tối ưu, không phải câu trả lời duy nhất.
+- Estimate sai có thể làm cost hiển thị thấp dù runtime cao.
+- Operator nhỏ nhưng chạy rất nhiều lần có thể tiêu thụ phần lớn tài nguyên.
+- Query có thể chờ lock hoặc storage dù CPU cost không cao.
+- Plan nhanh khi cache nóng có thể chậm khi phải đọc dữ liệu từ storage.
 
----
+Phân tích plan cần kết hợp cost với actual rows, loops, thời gian và lượng dữ liệu đọc.
 
-## 39. EXPLAIN và EXPLAIN ANALYZE
+## Khai báo `EXPLAIN`
 
-Trong PostgreSQL/MySQL, `EXPLAIN` là cách xem database dự định chạy query thế nào.
+`EXPLAIN` yêu cầu database trình bày plan cho một câu SQL:
 
 ```sql
 EXPLAIN
-SELECT Id, OrderNo, CreatedAt
-FROM Orders
-WHERE CustomerId = 10
-ORDER BY CreatedAt DESC;
+SELECT id,
+       ngayDatHang,
+       tongTien
+FROM orders
+WHERE khachHangId = 42
+ORDER BY ngayDatHang DESC, id DESC
+LIMIT 50;
 ```
 
-`EXPLAIN ANALYZE` chạy query thật rồi trả thêm thông tin runtime.
+Cú pháp lấy actual metrics và định dạng output khác nhau giữa các hệ quản trị. Trước khi dùng option thực thi thật, cần xác định rõ:
+
+- Query có thay đổi dữ liệu không.
+- Query có thể đọc bao nhiêu dữ liệu.
+- Công cụ có trả I/O, memory và timing hay không.
+- Việc đo có làm ảnh hưởng workload hiện tại không.
+
+## Access operators
+
+### Table scan
+
+Table scan đọc toàn bộ hoặc phần lớn table rồi kiểm tra predicate:
+
+```text
+Table scan orders
+  filter: trangThai = 'COMPLETED'
+```
+
+Table scan phù hợp khi table nhỏ hoặc predicate trả phần lớn row. Nếu query cần 70% bảng, lookup qua index rồi quay lại table có thể đắt hơn đọc tuần tự.
+
+### Index lookup
+
+Index lookup đi trực tiếp đến một key hoặc một phạm vi key:
+
+```text
+Index lookup ix_orders_customer_date
+  condition: khachHangId = 42
+```
+
+Lookup phù hợp khi predicate chọn ít row hoặc index đã cung cấp ordering cần thiết.
+
+### Index range scan
+
+Range scan đọc một đoạn liên tiếp của index:
+
+```text
+Index range scan ix_orders_customer_date
+  condition:
+    khachHangId = 42
+    ngayDatHang >= '2026-07-01'
+    ngayDatHang <  '2026-08-01'
+```
+
+Leading key xác định vùng bắt đầu. Range key xác định điểm dừng. Nếu index khớp với `ORDER BY`, plan có thể không cần operator sort riêng.
+
+### Table lookup
+
+Khi index không chứa đủ cột output, database dùng row locator để đọc row từ table:
+
+```text
+Index lookup
+└─ Table lookup
+```
+
+Table lookup hợp lý khi chỉ xảy ra vài lần. Nếu index trả 200.000 row và mỗi row tạo một lookup, lượng I/O ngẫu nhiên có thể lớn hơn table scan.
+
+### Covering access
+
+Nếu index chứa đủ key, predicate và output, plan có thể trả dữ liệu mà không cần table lookup:
+
+```text
+Covering index access
+  output: ngayDatHang, tongTien, trangThai
+```
+
+Covering access giảm đọc table nhưng yêu cầu index rộng hơn. Execution plan chỉ cho thấy lợi ích ở phía đọc; quyết định cuối cùng còn phải tính storage và write overhead.
+
+## Join algorithms
+
+Join algorithm quyết định cách hai input được kết hợp. Tên và availability có thể khác nhau, nhưng ba chiến lược sau là nền tảng để đọc plan.
+
+### Nested Loop Join
+
+Nested Loop lấy từng row từ outer input rồi tìm row phù hợp ở inner input:
+
+```text
+for each outerRow:
+  find matching innerRows
+```
+
+Nested Loop phù hợp khi:
+
+- Outer input nhỏ.
+- Inner input có index lookup hiệu quả.
+- Query cần dừng sớm.
+
+Nó trở nên đắt khi outer input lớn vì inner operator bị gọi lặp lại nhiều lần.
+
+```text
+Outer rows: 50.000
+Inner lookup loops: 50.000
+```
+
+### Hash Join
+
+Hash Join xây hash table từ một input rồi probe bằng input còn lại:
+
+```text
+Build smaller input
+  ↓
+Hash table
+  ↑
+Probe larger input
+```
+
+Hash Join thường phù hợp với equality join trên tập dữ liệu lớn. Nó cần memory cho hash table; estimate thấp có thể khiến dữ liệu vượt memory và phải dùng storage tạm.
+
+### Merge Join
+
+Merge Join đọc hai input đã được sắp xếp theo join key và tiến con trỏ đồng thời:
+
+```text
+Sorted input A ─┐
+                ├─ Merge matching keys
+Sorted input B ─┘
+```
+
+Merge Join phù hợp khi input đã có ordering hữu ích hoặc sort có thể tái sử dụng. Nếu phải sort hai tập lớn chỉ để join, chi phí chuẩn bị có thể làm chiến lược khác phù hợp hơn.
+
+Không phải hệ quản trị nào cũng cung cấp cùng tập join algorithm. Khi một operator không xuất hiện, cần kiểm tra capability của engine thay vì kết luận optimizer bỏ sót.
+
+## Sort
+
+Sort sắp xếp toàn bộ input hoặc một phần input theo key:
+
+```text
+Sort
+  key: ngayDatHang DESC, id DESC
+```
+
+Chi phí sort phụ thuộc:
+
+- Số row.
+- Độ rộng row.
+- Memory khả dụng.
+- Input đã có ordering một phần hay chưa.
+- Có `LIMIT` cho phép tối ưu Top-N hay không.
+
+Index phù hợp có thể cung cấp ordering và loại bỏ sort. Tuy nhiên, không nên thêm index chỉ để bỏ một sort nhỏ chạy trên vài trăm row.
+
+## Aggregate
+
+Aggregate thu nhiều row thành group hoặc một kết quả tổng:
 
 ```sql
-EXPLAIN ANALYZE
-SELECT Id, OrderNo, CreatedAt
-FROM Orders
-WHERE CustomerId = 10
-ORDER BY CreatedAt DESC;
+SELECT khachHangId,
+       SUM(tongTien) AS doanhThu
+FROM orders
+GROUP BY khachHangId;
 ```
 
-Khác biệt quan trọng:
+Hai chiến lược phổ biến:
 
-| Lệnh | Có chạy thật không? | Dùng để làm gì? |
-|---|---:|---|
-| `EXPLAIN` | Thường không chạy query thật | Xem plan dự kiến, an toàn hơn với query nặng |
-| `EXPLAIN ANALYZE` | Có chạy thật | So sánh estimated với actual, đo runtime thật |
+- **Hash aggregate:** dùng hash table theo group key.
+- **Sort/stream aggregate:** xử lý input đã được sắp xếp theo group key.
 
-Với câu `SELECT`, `EXPLAIN ANALYZE` thường an toàn hơn nhưng vẫn có thể tốn CPU/IO nếu query nặng. Với `INSERT`, `UPDATE`, `DELETE`, phải cực kỳ cẩn thận vì database có thể thực thi thay đổi thật tùy hệ quản trị và cú pháp dùng.
+Hash aggregate cần memory theo số group. Sort-based aggregate cần ordering. Estimate số group sai có thể làm memory không đủ hoặc chọn chiến lược không phù hợp.
 
-Trong SQL Server, tư duy tương tự nằm ở:
+## Filter và residual predicate
 
-- Estimated Execution Plan
-- Actual Execution Plan
-- `SET STATISTICS IO ON`
-- `SET STATISTICS TIME ON`
-
-Điểm cần nhớ: estimated plan cho biết database nghĩ gì. Actual plan hoặc `EXPLAIN ANALYZE` cho biết chuyện gì đã thật sự xảy ra.
-
----
-
-## 40. Cách đọc EXPLAIN theo thứ tự
-
-Đừng mở plan lên rồi nhảy ngay vào câu hỏi "có dùng index không?".
-
-Một thứ tự đọc thực dụng:
-
-1. Query trả bao nhiêu dòng?
-2. Bảng chính có bao nhiêu dòng?
-3. Operator nào xử lý nhiều dòng nhất?
-4. Operator nào tốn thời gian nhất?
-5. Estimated rows và actual rows lệch bao nhiêu?
-6. Có scan lớn không, scan đó có hợp lý không?
-7. Có key lookup lặp nhiều không?
-8. Có sort/hash/aggregate lớn không?
-9. Có spill ra disk/tempdb không?
-10. Predicate có SARGable không?
-11. Index hiện có có khớp `WHERE`, `JOIN`, `ORDER BY` không?
-12. Query có đang trả quá nhiều cột/dòng so với nhu cầu thật không?
-
-Nếu query trả 80% bảng, scan có thể là lựa chọn đúng. Nếu query trả 50 dòng nhưng plan đọc 1 triệu dòng rồi sort, đó mới là tín hiệu cần xử lý.
-
-Một câu hỏi middle hay hỏi:
+Access condition xác định phần dữ liệu có thể loại bỏ ngay khi đọc index. Residual predicate được kiểm tra sau khi access path đã lấy row.
 
 ```text
-Vì sao query không dùng index?
+Index condition: khachHangId = 42
+Residual filter: tongTien > 1000000
 ```
 
-Một câu hỏi senior hơn:
+Nếu index bắt đầu bằng `khachHangId` nhưng không tổ chức theo `tongTien`, database có thể dùng phần đầu để thu hẹp vùng đọc rồi kiểm tra `tongTien` trên từng row còn lại.
+
+Plan có index không đồng nghĩa mọi predicate đều đã trở thành index condition.
+
+## Materialization và dữ liệu tạm
+
+Một số operator cần giữ lại kết quả trung gian để:
+
+- Dùng lại nhiều lần.
+- Sort.
+- Build hash table.
+- Loại trùng.
+- Bảo đảm một boundary thực thi.
+
+Nếu dữ liệu trung gian vượt memory, database có thể ghi phần dư xuống storage tạm. Hiện tượng này thường gọi là spill.
+
+Spill là triệu chứng, không tự xác định root cause. Nguyên nhân có thể là:
+
+- Actual rows lớn hơn estimate.
+- Row quá rộng.
+- Memory cho query bị giới hạn.
+- Query xử lý quá nhiều dữ liệu trước khi lọc.
+- Thiếu ordering hoặc access path phù hợp.
+
+## Cardinality estimate
+
+Cardinality estimate là số row optimizer dự đoán tại từng operator. Estimate ảnh hưởng trực tiếp đến:
+
+- Access path.
+- Join order.
+- Join algorithm.
+- Memory cần thiết.
+- Quyết định materialize hoặc sort.
+
+Ví dụ:
 
 ```text
-Nếu dùng index thì có thật sự rẻ hơn scan không, với số dòng thực tế này?
+Estimated rows: 1.000
+Actual rows:   50.000
+Sai lệch:      50×
 ```
 
----
+Optimizer có thể chọn Nested Loop vì outer input dự kiến nhỏ. Khi actual input lớn gấp 50 lần, inner lookup bị lặp quá nhiều.
 
-## 41. Đọc EXPLAIN qua ví dụ production
+Sai lệch ở leaf operator có thể lan truyền lên toàn cây. Vì vậy, nên tìm operator đầu tiên nơi estimated rows bắt đầu lệch mạnh thay vì chỉ nhìn root.
 
-Query danh sách hóa đơn:
+## Selectivity và statistics
+
+Selectivity mô tả mức độ predicate thu hẹp dữ liệu. Statistics cung cấp cho optimizer thông tin về:
+
+- Số row.
+- Số giá trị phân biệt.
+- Phân bố giá trị.
+- Giá trị phổ biến.
+- Tỷ lệ `NULL`.
+- Tương quan giữa giá trị và thứ tự lưu trữ, nếu engine theo dõi.
+
+Statistics cũ hoặc không mô tả được data skew có thể làm cardinality estimate sai.
+
+Ví dụ, `trangThai = 'FAILED'` có thể chỉ chiếm 0,1% bảng trong tuần bình thường nhưng tăng lên 20% khi hệ thống ngoài gặp sự cố. Cùng một predicate lúc đó có access cost hoàn toàn khác.
+
+## Correlated columns
+
+Optimizer thường phải ước lượng nhiều predicate cùng lúc:
 
 ```sql
-SELECT Id, InvoiceNo, CustomerId, TotalAmount, Status, InvoiceDate
-FROM Invoices
-WHERE TenantId = @tenantId
-  AND ShopId = @shopId
-  AND IsDeleted = 0
-  AND InvoiceDate >= @fromDate
-  AND InvoiceDate < @toDate
-ORDER BY InvoiceDate DESC, Id DESC
-OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY;
+WHERE quocGia = 'VN'
+  AND thanhPho = 'Ha Noi'
 ```
 
-Plan hiện tại:
+Hai cột có quan hệ với nhau. Nếu cost model xem chúng độc lập, estimate có thể thấp hơn thực tế.
 
-```text
-Index Scan IX_Invoices_Tenant
-Residual predicate: ShopId, IsDeleted, InvoiceDate
-Sort InvoiceDate DESC, Id DESC
-Key Lookup x 180000
-Return 50 rows
-```
+Khi phát hiện sai lệch do correlation, hướng xử lý phụ thuộc khả năng statistics và index của hệ quản trị. Trước hết cần chứng minh điểm sai bằng estimated rows và actual rows.
 
-Đọc plan:
+## Parameter values và plan reuse
 
-- Có dùng index, nhưng index chỉ giúp một phần
-- `ShopId`, `IsDeleted`, `InvoiceDate` bị lọc sau khi đã đọc nhiều dòng
-- Sort lớn xảy ra trước pagination
-- Key lookup lặp quá nhiều chỉ để trả 50 dòng
-
-Index có thể cân nhắc:
+Cùng một query parameterized có thể nhận giá trị với phân bố rất khác:
 
 ```sql
-CREATE INDEX IX_Invoices_Tenant_Shop_Date_Id
-ON Invoices(TenantId, ShopId, InvoiceDate DESC, Id DESC)
-INCLUDE (InvoiceNo, CustomerId, TotalAmount, Status)
-WHERE IsDeleted = 0;
+WHERE tenantId = 10
 ```
 
-Nếu database không hỗ trợ filtered index:
+Tenant nhỏ có 1.000 order; tenant lớn có 50 triệu order. Một plan phù hợp cho tenant nhỏ có thể không phù hợp cho tenant lớn.
+
+Cơ chế compile, cache và reuse plan khác nhau giữa các hệ quản trị và driver. Phần phân tích chung gồm:
+
+1. So sánh plan và runtime giữa các giá trị đại diện.
+2. Kiểm tra data skew.
+3. Kiểm tra statistics.
+4. Xác định plan có được tái sử dụng hay tối ưu lại.
+5. Chỉ dùng hint hoặc cơ chế ép plan sau khi hiểu trade-off của engine.
+
+## Memory và spill
+
+Sort, hash join, aggregate và materialization có thể cần memory theo số row và độ rộng row.
+
+```text
+Required memory ≈ row count × row width × operator overhead
+```
+
+Nếu estimate thấp, optimizer có thể dự trù ít memory hơn thực tế. Khi operator không giữ đủ dữ liệu trong memory, temporary I/O làm latency tăng.
+
+Khi thấy spill, cần kiểm tra:
+
+- Estimated rows và actual rows.
+- Row width.
+- Cột không cần thiết trong `SELECT`.
+- Predicate có thể áp dụng sớm hơn không.
+- Index có thể cung cấp ordering không.
+- Workload concurrent có làm memory mỗi query bị thu hẹp không.
+
+## Thứ tự đọc execution plan
+
+Một trình tự ổn định giúp tránh tập trung nhầm vào operator có cost hiển thị lớn nhất.
+
+1. Xác nhận query text và parameter của lần chạy.
+2. Đọc root để hiểu output và số row cuối.
+3. Xác định leaf operator đọc các table chính.
+4. So estimated rows với actual rows từ leaf đi lên.
+5. Tìm operator đầu tiên có sai lệch lớn.
+6. Kiểm tra access condition và residual predicate.
+7. Kiểm tra loops của inner operator.
+8. Kiểm tra sort, aggregate, hash hoặc materialization.
+9. Kiểm tra memory, spill và lượng dữ liệu đọc.
+10. Đối chiếu plan với latency toàn request, concurrency và lock wait.
+
+Plan là một phần của request path. Query có plan hợp lý vẫn có thể chậm vì chờ lock, network, N+1 query hoặc gọi service khác.
+
+## Ứng dụng
+
+### Lịch sử đơn hàng
+
+Query lấy 50 order gần nhất của một customer:
 
 ```sql
-CREATE INDEX IX_Invoices_Tenant_Shop_IsDeleted_Date_Id
-ON Invoices(TenantId, ShopId, IsDeleted, InvoiceDate DESC, Id DESC)
-INCLUDE (InvoiceNo, CustomerId, TotalAmount, Status);
+SELECT id,
+       ngayDatHang,
+       tongTien,
+       trangThai
+FROM orders
+WHERE khachHangId = 42
+ORDER BY ngayDatHang DESC, id DESC
+LIMIT 50;
 ```
 
-Sau khi thêm index, không được dừng ở "đã tạo index". Phải đo lại:
-
-- Logical reads giảm không?
-- Sort lớn còn không?
-- Key lookup còn không?
-- Actual rows có khớp estimate hơn không?
-- Write latency của bảng `Invoices` có tăng đáng kể không?
-- Index mới có trùng hoặc gần trùng index cũ không?
-
----
-
-## 42. Những bẫy khi đọc EXPLAIN
-
-### 42.1. Chỉ nhìn cost
-
-Cost là mô hình ước lượng của database, không phải thời gian tuyệt đối. Operator cost cao đáng để xem, nhưng không đủ để kết luận.
-
-### 42.2. Thấy scan là thêm index
-
-Scan có thể hợp lý nếu query trả nhiều dữ liệu. Vấn đề có thể nằm ở use case, pagination, export async hoặc report model.
-
-### 42.3. Thấy seek là yên tâm
-
-Seek trả ra quá nhiều dòng, hoặc seek xong lookup hàng trăm nghìn lần, vẫn có thể rất chậm.
-
-### 42.4. Tin missing index suggestion tuyệt đối
-
-Suggestion không biết write workload, index trùng, nghiệp vụ hot path, dung lượng và cách rollback. Nó là gợi ý điều tra, không phải lệnh phải làm.
-
-### 42.5. Quên data skew
-
-Tenant nhỏ và tenant lớn có thể cần plan khác nhau. Một plan đẹp ở dev hoặc staging chưa chắc chịu được production.
-
-### 42.6. Quên nhìn toàn bộ request
-
-Từng query có plan đẹp nhưng API vẫn chậm nếu có N+1 query, payload quá lớn, lock/blocking, connection pool cạn hoặc UI render quá nhiều dòng.
-
----
-
-## 43. Tư duy senior khi đọc plan
-
-Junior thường hỏi:
+Plan không có index phù hợp có thể mang hình dạng:
 
 ```text
-Query có dùng index không?
+Limit 50
+└─ Sort by ngayDatHang DESC, id DESC
+   └─ Table scan orders
+      filter: khachHangId = 42
 ```
 
-Middle hỏi:
+Hai operator cần kiểm tra:
+
+- Table scan đọc bao nhiêu row để giữ lại 50 row?
+- Sort nhận bao nhiêu row trước khi `LIMIT` được áp dụng?
+
+Index theo `(khachHangId, ngayDatHang DESC, id DESC)` tạo access path khớp filter và ordering:
 
 ```text
-Query dùng index nào?
-Seek hay scan?
-Có lookup/sort không?
+Limit 50
+└─ Index range scan ix_orders_customer_date
+   condition: khachHangId = 42
 ```
 
-Senior hỏi:
+Lợi ích không đến từ tên “index”. Plan mới có thể đi đến vùng key cần thiết, đọc theo đúng ordering và dừng sớm.
+
+### Table lookup lặp lại
+
+Giả sử index chỉ chứa `khachHangId` nhưng API còn cần `tongTien` và `trangThai`:
 
 ```text
-Plan này có phù hợp với dữ liệu thật không?
-Estimate có đáng tin không?
-Plan này ổn cho tenant lớn và tenant nhỏ không?
-Index mới ảnh hưởng write thế nào?
-Nếu dữ liệu tăng 10 lần thì plan còn ổn không?
-Có cần đổi use case, pagination, report model hoặc data model không?
-Sau deploy đo bằng gì?
+Index lookup ix_orders_customer
+└─ Table lookup × 200.000
 ```
 
-Execution plan là nơi database nói thật với mình, nhưng mình phải biết nghe đúng cách.
+Root cause không phải lookup tồn tại mà là lookup count quá lớn. Các hướng cần đánh giá:
 
----
+- Query có thật sự cần trả 200.000 row không?
+- Predicate có thể thu hẹp sớm hơn không?
+- Output có cột không cần thiết không?
+- Covering index có đáng với write overhead không?
+- Table scan có rẻ hơn khi kết quả chiếm phần lớn bảng không?
 
-## 44. Câu tổng kết
+Không nên tự động tạo covering index trước khi trả lời các câu hỏi này.
 
-Execution Plan không phải công cụ chỉ dành cho DBA.
+### Báo cáo doanh thu
 
-Backend developer càng làm hệ thống business lớn càng cần biết đọc plan, vì rất nhiều lỗi production nằm ở chỗ:
+```sql
+SELECT chiNhanhId,
+       SUM(tongTien) AS doanhThu
+FROM invoices
+WHERE ngayHoaDon >= '2026-07-01'
+  AND ngayHoaDon < '2026-08-01'
+  AND trangThai = 'PAID'
+GROUP BY chiNhanhId;
+```
+
+Plan có thể cần:
 
 ```text
-Query chạy được ở dev.
-Dữ liệu production lớn hơn nhiều.
-Optimizer chọn plan khác.
-API timeout.
-Transaction giữ lock lâu.
-User thấy hệ thống chậm.
+Aggregate by chiNhanhId
+└─ Scan invoices
+   filter:
+     ngayHoaDon trong tháng 07
+     trangThai = 'PAID'
 ```
 
-**Kết luận**: Đọc execution plan tốt giúp mình chuyển từ "tối ưu theo cảm giác" sang "tối ưu có bằng chứng". Đây là kỹ năng rất đáng đầu tư nếu muốn đi từ middle lên senior backend.
+Nếu query đọc phần lớn dữ liệu của tháng, scan có thể hợp lý. Câu hỏi quan trọng hơn là:
+
+- Bao nhiêu row đi vào aggregate?
+- Có bao nhiêu group?
+- Aggregate có spill không?
+- Predicate có được áp dụng trước aggregate không?
+- Báo cáo có cần bảng tổng hợp hoặc partition thay vì thêm index không?
+
+### Predicate không indexable
+
+```sql
+SELECT id, createdAt
+FROM orders
+WHERE DATE(createdAt) = '2026-07-26';
+```
+
+Function trên cột có thể làm access path không xác định được range trực tiếp. Viết lại:
+
+```sql
+SELECT id, createdAt
+FROM orders
+WHERE createdAt >= '2026-07-26 00:00:00'
+  AND createdAt <  '2026-07-27 00:00:00';
+```
+
+Plan sau khi viết lại cần được kiểm tra xem predicate đã trở thành index range condition hay chưa. Viết query indexable không bảo đảm index luôn được chọn nếu range vẫn trả phần lớn bảng.
+
+### Data skew
+
+Query dùng chung cho nhiều tenant:
+
+```sql
+SELECT id, tongTien
+FROM orders
+WHERE tenantId = 10
+  AND trangThai = 'PENDING';
+```
+
+Nếu tenant `10` có dữ liệu lớn hơn phần còn lại hàng nghìn lần, plan trung bình có thể không phù hợp. Cần so sánh:
+
+- Estimated rows và actual rows của tenant nhỏ.
+- Estimated rows và actual rows của tenant lớn.
+- Statistics có mô tả được giá trị phổ biến không.
+- Plan có thay đổi theo parameter hay bị tái sử dụng.
+- Query shape có cần tách theo workload thực tế không.
+
+## Dấu hiệu phân tích sai
+
+### Đồng nhất scan với thiếu index
+
+Scan có thể là access path đúng khi query trả phần lớn table.
+
+### Đồng nhất index lookup với plan tốt
+
+Lookup trả hàng triệu row hoặc kéo theo table lookup lặp lại vẫn có thể đắt hơn scan.
+
+### Chỉ nhìn cost phần trăm
+
+Cost dựa trên estimate. Estimate sai làm tỷ lệ cost không phản ánh runtime thực.
+
+### Chỉ nhìn root operator
+
+Sai lệch cardinality thường bắt đầu ở leaf rồi lan lên join, sort và aggregate.
+
+### Tối ưu từng query nhưng bỏ qua request
+
+Một query nhanh không sửa được N+1, retry lặp, lock wait hoặc payload quá lớn.
+
+### Tin tuyệt đối vào gợi ý index
+
+Gợi ý tự động thường chỉ nhìn một query và lợi ích đọc, không hiểu write workload, index trùng lặp hoặc query contract.
+
+## Khác biệt cần tách theo hệ quản trị
+
+Các khái niệm operator tree, cardinality, cost, access path, join algorithm, sort, aggregate và spill có thể dùng chung. Những phần sau cần đọc tài liệu riêng của engine:
+
+- Tên plan node.
+- Cú pháp thu actual metrics, I/O và timing.
+- Join algorithm được hỗ trợ.
+- Plan cache và cơ chế tối ưu query parameterized.
+- Memory allocation cho từng operator.
+- Format JSON, text hoặc visual plan.
+- Gợi ý index và query hint.
+- Parallel execution.
+
+Không nên lấy tên operator hoặc option đo lường của một engine làm định nghĩa chung cho execution plan.
+
+## Quy trình đánh giá thay đổi
+
+Mọi thay đổi query hoặc index cần một baseline:
+
+1. Lưu query, parameter và plan trước thay đổi.
+2. Ghi lại row count, runtime, lượng dữ liệu đọc và spill.
+3. Xác định một root cause có bằng chứng.
+4. Thay đổi một yếu tố: query shape, index hoặc statistics.
+5. Chạy lại trên cùng dữ liệu và parameter.
+6. So sánh plan mới với baseline.
+7. Kiểm tra tác động tới workload ghi và query liên quan.
+8. Xác định cách rollback.
+
+Nếu rewrite làm thay đổi row identity, cardinality, `NULL` semantics hoặc ordering, đó không còn là tối ưu tương đương.
+
+## Tổng kết
+
+Execution plan mô tả chuỗi operator mà database dùng để thực hiện SQL. Access path quyết định cách đọc row; join algorithm quyết định cách kết hợp relation; sort, aggregate và materialization quyết định cách biến đổi tập dữ liệu.
+
+Estimated rows là đầu vào quan trọng của optimizer. Actual rows, loops, memory, spill và lượng dữ liệu đọc cho biết plan có phù hợp với dữ liệu thật hay không.
+
+Đọc plan hiệu quả không bắt đầu từ operator có cost lớn nhất. Nó bắt đầu từ query contract, đi từ leaf lên root, tìm điểm estimate bắt đầu sai và kiểm chứng từng thay đổi bằng số liệu.

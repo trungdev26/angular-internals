@@ -1,0 +1,448 @@
+<section class="storage-lab" aria-labelledby="storage-lab-title">
+  <header class="hero">
+    <p class="eyebrow">Interactive Storage Engine Lab</p>
+    <h2 id="storage-lab-title">Từ Query đến Buffer Pool, WAL và Storage</h2>
+    <p>
+      Chọn một bài toán, đọc dữ kiện rồi chạy từng bước. Mỗi trạng thái trả lời một câu hỏi cụ thể:
+      dữ liệu đang ở đâu, thao tác nào phát sinh I/O và thời điểm nào thay đổi trở nên bền vững.
+    </p>
+  </header>
+
+  <nav class="lab-grid" aria-label="Danh sách bài toán">
+    <button
+      *ngFor="let lab of labs; trackBy: trackByIndex"
+      type="button"
+      class="lab-option"
+      [class.lab-option--active]="activeLab === lab.id"
+      (click)="selectLab(lab.id)"
+    >
+      <span>Lab 0{{ labs.indexOf(lab) + 1 }}</span>
+      <strong>{{ lab.label }}</strong>
+      <small>{{ lab.description }}</small>
+    </button>
+  </nav>
+
+  <section class="case-brief">
+    <div class="case-brief__main">
+      <div class="case-kicker">
+        <span>Bài toán 0{{ labNumber }}</span>
+        <strong>{{ activeLabInfo.label }}</strong>
+      </div>
+      <h3>{{ activeLabInfo.caseTitle }}</h3>
+      <p>{{ activeLabInfo.context }}</p>
+
+      <div class="fact-grid">
+        <div *ngFor="let fact of scenarioFacts; trackBy: trackByIndex">
+          <span>{{ fact.label }}</span>
+          <strong>{{ fact.value }}</strong>
+        </div>
+      </div>
+    </div>
+
+    <div class="case-brief__analysis">
+      <div>
+        <span class="analysis-label analysis-label--warning">Hiện tượng</span>
+        <p>{{ activeLabInfo.symptom }}</p>
+      </div>
+      <div>
+        <span class="analysis-label">Cần trả lời</span>
+        <p>{{ activeLabInfo.question }}</p>
+      </div>
+      <div class="query-box">
+        <span>Workload</span>
+        <code>{{ activeLabInfo.query }}</code>
+      </div>
+    </div>
+  </section>
+
+  <section class="notation-panel">
+    <div class="notation-panel__title">
+      <span>Cách đọc mô hình</span>
+      <strong>Page number không phải Row ID</strong>
+    </div>
+    <div class="notation-grid">
+      <div>
+        <span class="notation-symbol">Page #42</span>
+        <p>
+          Một khối dữ liệu có kích thước cố định của database. Một page thường chứa nhiều row; số
+          page là định danh nội bộ dùng trong mô phỏng.
+        </p>
+      </div>
+      <div>
+        <span class="notation-symbol">Frame 3</span>
+        <p>
+          Một ô trong RAM đủ để giữ bản sao của một page. Page có thể chuyển vào hoặc bị thay khỏi
+          frame này.
+        </p>
+      </div>
+      <div [ngSwitch]="activeLab">
+        <ng-container *ngSwitchCase="'pressure'">
+          <span class="notation-symbol">#1–#3 → #20–#25</span>
+          <p>
+            Page #1–#3 chứa đơn hàng mới của API; Page #20–#25 chứa dữ liệu lịch sử mà report quét
+            qua.
+          </p>
+        </ng-container>
+        <ng-container *ngSwitchCase="'write'">
+          <span class="notation-symbol">Account Id 17 → Page #7</span>
+          <p>
+            Row của tài khoản 17 nằm trong Page #7 cùng các row khác. Page #7 không có nghĩa là
+            Account Id 7.
+          </p>
+        </ng-container>
+        <ng-container *ngSwitchDefault>
+          <span class="notation-symbol">OrderId 4201 → Page #42</span>
+          <p>
+            Index định vị row của đơn hàng 4201 trong Page #42; Storage Engine đọc cả page vào một
+            frame.
+          </p>
+        </ng-container>
+      </div>
+    </div>
+  </section>
+
+  <section class="setup-panel">
+    <div class="setup-panel__title">
+      <span>01</span>
+      <div>
+        <strong>Thiết lập trạng thái ban đầu</strong>
+        <small>Thay đổi tham số sẽ đưa mô phỏng về bước đầu.</small>
+      </div>
+    </div>
+
+    <div class="segmented" *ngIf="activeLab === 'read'" role="group" aria-label="Trạng thái cache">
+      <button type="button" [class.active]="readMode === 'cold'" (click)="setReadMode('cold')">
+        Cold cache · Page #42 chưa có
+      </button>
+      <button type="button" [class.active]="readMode === 'warm'" (click)="setReadMode('warm')">
+        Warm cache · Page #42 đã có
+      </button>
+    </div>
+
+    <div class="pressure-controls" *ngIf="activeLab === 'pressure'">
+      <div class="segmented" role="group" aria-label="Mẫu truy cập">
+        <button
+          type="button"
+          [class.active]="pressurePattern === 'fits'"
+          (click)="setPressurePattern('fits')"
+        >
+          Working set vừa RAM
+        </button>
+        <button
+          type="button"
+          [class.active]="pressurePattern === 'exceeds'"
+          (click)="setPressurePattern('exceeds')"
+        >
+          Working set vượt RAM
+        </button>
+        <button
+          type="button"
+          [class.active]="pressurePattern === 'report'"
+          (click)="setPressurePattern('report')"
+        >
+          Report chen ngang
+        </button>
+      </div>
+      <label class="capacity-control">
+        <span
+          >Buffer Pool: <strong>{{ bufferCapacity }} frames</strong></span
+        >
+        <input
+          type="range"
+          min="3"
+          max="6"
+          step="1"
+          [value]="bufferCapacity"
+          (input)="setCapacity($any($event.target).valueAsNumber)"
+        />
+      </label>
+    </div>
+
+    <div class="write-rule" *ngIf="activeLab === 'write'">
+      <strong>Quy tắc cần kiểm chứng:</strong>
+      WAL phải bền vững trước khi COMMIT được xác nhận; data page có thể được flush sau.
+    </div>
+  </section>
+
+  <section class="simulation">
+    <div class="simulation__heading">
+      <div class="section-title">
+        <span>02</span>
+        <div>
+          <strong>Chạy luồng dữ liệu</strong>
+          <small>Node sáng là thành phần đang xử lý ở bước hiện tại.</small>
+        </div>
+      </div>
+      <div class="step-count">Bước {{ currentStepIndex + 1 }} / {{ steps.length }}</div>
+    </div>
+
+    <div class="progress-track" aria-hidden="true">
+      <div [style.width.%]="progressPercent"></div>
+    </div>
+
+    <div class="simulation__body">
+      <div class="diagram" [ngSwitch]="activeLab">
+        <ng-container *ngSwitchCase="'write'">
+          <div class="flow-row flow-row--write">
+            <div class="node" [class.node--active]="isNodeActive('query')">
+              <span>Application</span>
+              <strong>UPDATE / COMMIT</strong>
+              <small [class.status--success]="commitAcknowledged">
+                {{ commitAcknowledged ? 'COMMIT acknowledged' : 'Đang chờ kết quả' }}
+              </small>
+            </div>
+            <span class="arrow">→</span>
+            <div class="node" [class.node--active]="isNodeActive('buffer')">
+              <span>Memory</span>
+              <strong>Buffer Pool</strong>
+              <small>{{ dirtyPageCount ? 'Page #7 · DIRTY' : 'Page #7 · CLEAN' }}</small>
+            </div>
+            <span class="arrow">→</span>
+            <div class="node" [class.node--active]="isNodeActive('wal-buffer')">
+              <span>Memory</span>
+              <strong>WAL Buffer</strong>
+              <small>{{ walBuffered ? 'Có log record' : 'Chưa có log record' }}</small>
+            </div>
+          </div>
+          <div class="durability-row">
+            <div class="node node--storage" [class.node--active]="isNodeActive('wal-file')">
+              <span>Durable storage</span>
+              <strong>WAL / Log File</strong>
+              <small [class.status--success]="walDurable">
+                {{ walDurable ? 'Log record đã bền vững' : 'Chưa flush' }}
+              </small>
+            </div>
+            <div class="durability-link">WAL trước, data page sau</div>
+            <div class="node node--storage" [class.node--active]="isNodeActive('data-file')">
+              <span>Durable storage</span>
+              <strong>Data File</strong>
+              <small [class.status--success]="dataPageDurable">
+                {{ dataPageDurable ? 'Page #7 đã cập nhật' : 'Page #7 còn bản cũ' }}
+              </small>
+            </div>
+          </div>
+        </ng-container>
+
+        <ng-container *ngSwitchDefault>
+          <div class="flow-row">
+            <div class="node" [class.node--active]="isNodeActive('query')">
+              <span>Execution engine</span>
+              <strong>Query</strong>
+              <small>Yêu cầu Page #{{ activeLab === 'read' ? 42 : currentPageId || '—' }}</small>
+            </div>
+            <span class="arrow">→</span>
+            <div class="node" [class.node--active]="isNodeActive('buffer')">
+              <span>Memory</span>
+              <strong>Buffer Pool</strong>
+              <small *ngIf="currentAccess === null">Chưa kiểm tra</small>
+              <small *ngIf="currentAccess === 'hit'" class="status--success">CACHE HIT</small>
+              <small *ngIf="currentAccess === 'miss'" class="status--warning">CACHE MISS</small>
+            </div>
+            <span class="arrow arrow--conditional">⇄</span>
+            <div class="node node--storage" [class.node--active]="isNodeActive('storage')">
+              <span>Durable storage</span>
+              <strong>Data File</strong>
+              <small>{{ physicalReads }} physical read</small>
+            </div>
+            <span class="arrow" *ngIf="activeLab === 'read'">→</span>
+            <div
+              class="node"
+              *ngIf="activeLab === 'read'"
+              [class.node--active]="isNodeActive('cpu')"
+            >
+              <span>Execution</span>
+              <strong>CPU / Result</strong>
+              <small>Đọc row từ frame</small>
+            </div>
+          </div>
+        </ng-container>
+
+        <div class="buffer-section">
+          <div class="buffer-section__head">
+            <div>
+              <strong>Frames trong Buffer Pool</strong>
+              <small>Mỗi frame chứa bản sao của một data page trong RAM.</small>
+            </div>
+            <div class="legend">
+              <span><i class="legend__hit"></i>Đang dùng / hit</span>
+              <span><i class="legend__load"></i>Vừa nạp / miss</span>
+              <span *ngIf="activeLab === 'write'"><i class="legend__dirty"></i>Dirty</span>
+            </div>
+          </div>
+
+          <div class="frames">
+            <div
+              *ngFor="let frame of frames; let index = index; trackBy: trackByIndex"
+              class="frame"
+              [class.frame--empty]="frame.pageId === null"
+              [class.frame--active]="frame.state === 'active'"
+              [class.frame--loaded]="frame.state === 'loaded'"
+              [class.frame--dirty]="frame.state === 'dirty'"
+            >
+              <span>Frame {{ index + 1 }}</span>
+              <strong>{{ frame.pageId === null ? 'Empty' : 'Page #' + frame.pageId }}</strong>
+              <small class="frame__meaning">{{ pageMeaning(frame.pageId) }}</small>
+              <em *ngIf="frame.state === 'dirty'">DIRTY</em>
+            </div>
+          </div>
+
+          <div class="access-sequence" *ngIf="activeLab === 'pressure'">
+            <span
+              *ngFor="let pageId of pressureSequence; let index = index; trackBy: trackByIndex"
+              [class.sequence-item--done]="index <= currentStepIndex"
+              [class.sequence-item--current]="index === currentStepIndex"
+              [attr.title]="'Page #' + pageId + ' · ' + pageMeaning(pageId)"
+            >
+              #{{ pageId }}
+            </span>
+          </div>
+          <p class="sequence-note" *ngIf="activeLab === 'pressure'">
+            Mỗi ô là một yêu cầu đọc page theo thời gian:
+            <strong>#1–#3 là dữ liệu nóng của API</strong>,
+            <strong>#20–#25 là dữ liệu lịch sử của report</strong>.
+          </p>
+        </div>
+      </div>
+
+      <aside class="step-panel">
+        <span class="step-panel__eyebrow">{{
+          currentStep ? 'Bước đang chạy' : 'Trước khi chạy'
+        }}</span>
+        <h3>{{ currentStep?.title || 'Đọc bài toán và dự đoán kết quả' }}</h3>
+        <p>
+          {{
+            currentStep?.detail ||
+              'Dùng “Bước tiếp theo” để quan sát từng thay đổi. Sau đó đổi trạng thái đầu hoặc mẫu truy cập để đối chiếu.'
+          }}
+        </p>
+
+        <div class="event-box" *ngIf="activeLab === 'pressure' && currentStep">
+          <span>Kết quả truy cập</span>
+          <strong
+            [class.status--success]="currentAccess === 'hit'"
+            [class.status--warning]="currentAccess === 'miss'"
+          >
+            Page #{{ currentPageId }} · {{ currentAccess === 'hit' ? 'CACHE HIT' : 'CACHE MISS' }}
+          </strong>
+          <small>{{ pageMeaning(currentPageId) }}</small>
+          <small *ngIf="evictedPageId !== null"
+            >Evict Page #{{ evictedPageId }} ({{ pageMeaning(evictedPageId) }}) vì ít dùng gần đây
+            nhất.</small
+          >
+          <small *ngIf="evictedPageId === null && currentAccess === 'miss'"
+            >Còn frame trống nên chưa cần eviction.</small
+          >
+        </div>
+
+        <div class="player-controls">
+          <button
+            type="button"
+            class="button"
+            (click)="previousStep()"
+            [disabled]="currentStepIndex < 0 || isPlaying"
+          >
+            Quay lại
+          </button>
+          <button
+            type="button"
+            class="button button--primary"
+            (click)="nextStep()"
+            [disabled]="isPlaying"
+          >
+            {{ currentStepIndex >= steps.length - 1 ? 'Chạy lại' : 'Bước tiếp theo' }}
+          </button>
+          <button type="button" class="button" (click)="togglePlay()">
+            {{ isPlaying ? 'Tạm dừng' : 'Tự chạy' }}
+          </button>
+        </div>
+
+        <div class="speed-control">
+          <span>Tốc độ tự chạy</span>
+          <div class="segmented segmented--compact">
+            <button type="button" [class.active]="speedMs === 1400" (click)="setSpeed(1400)">
+              0.5×
+            </button>
+            <button type="button" [class.active]="speedMs === 900" (click)="setSpeed(900)">
+              1×
+            </button>
+            <button type="button" [class.active]="speedMs === 500" (click)="setSpeed(500)">
+              2×
+            </button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <section class="result-panel">
+    <div class="section-title">
+      <span>03</span>
+      <div>
+        <strong>Đọc kết quả</strong>
+        <small>Chỉ số được cập nhật đến bước hiện tại.</small>
+      </div>
+    </div>
+
+    <div class="metrics" *ngIf="activeLab !== 'write'">
+      <div>
+        <span>Logical Reads</span>
+        <strong>{{ logicalReads }}</strong>
+        <small>Số page query yêu cầu</small>
+      </div>
+      <div>
+        <span>Physical Reads</span>
+        <strong>{{ physicalReads }}</strong>
+        <small>Số page phải lấy từ storage</small>
+      </div>
+      <div>
+        <span>Cache Hit Ratio</span>
+        <strong>{{ hitRatio | number: '1.0-0' }}%</strong>
+        <small>{{ hitCount }} hit / {{ physicalReads }} miss</small>
+      </div>
+      <div>
+        <span>Evictions</span>
+        <strong>{{ evictions }}</strong>
+        <small>Page bị thay khỏi RAM</small>
+      </div>
+    </div>
+
+    <div class="metrics" *ngIf="activeLab === 'write'">
+      <div>
+        <span>Dirty Pages</span>
+        <strong>{{ dirtyPageCount }}</strong>
+        <small>Đã đổi trong RAM, chưa flush</small>
+      </div>
+      <div>
+        <span>WAL Durable</span>
+        <strong>{{ walDurable ? 'YES' : 'NO' }}</strong>
+        <small>Log record đã xuống storage</small>
+      </div>
+      <div>
+        <span>Commit ACK</span>
+        <strong>{{ commitAcknowledged ? 'YES' : 'NO' }}</strong>
+        <small>Ứng dụng đã nhận thành công</small>
+      </div>
+      <div>
+        <span>Data Page Durable</span>
+        <strong>{{ dataPageDurable ? 'YES' : 'NO' }}</strong>
+        <small>Page #7 đã xuống data file</small>
+      </div>
+    </div>
+
+    <p class="takeaway" *ngIf="activeLab === 'read'">
+      <strong>Kết luận:</strong> Logical read mô tả nhu cầu đọc page của query; Physical read chỉ
+      xuất hiện khi Buffer Pool không có page. Execution plan giống nhau không bảo đảm latency giống
+      nhau nếu trạng thái cache khác nhau.
+    </p>
+    <p class="takeaway" *ngIf="activeLab === 'pressure'">
+      <strong>Kết luận:</strong> Buffer Pool hiệu quả khi working set đang hoạt động nằm vừa RAM.
+      Sequential scan hoặc report lớn có thể thay các hot page, làm workload khác chịu cache miss dù
+      không đổi query.
+    </p>
+    <p class="takeaway" *ngIf="activeLab === 'write'">
+      <strong>Kết luận:</strong> WAL bảo vệ durability của transaction trước khi data page được
+      flush. Dirty Page là trạng thái bình thường; rủi ro xuất hiện khi WAL chưa bền vững mà hệ
+      thống đã xác nhận COMMIT.
+    </p>
+  </section>
+</section>

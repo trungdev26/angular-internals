@@ -1405,7 +1405,7 @@ this.ngZone.runOutsideAngular(() => {
 });
 ```
 
-### 10.3. Case study: màn 500 component bị giật
+### 10.3. màn 500 component bị giật
 
 Hiện tượng: màn hiển thị 500 chỉ số, mỗi chỉ số là một component/cell/row, khi nhập dữ liệu hoặc search thì UI giật.
 

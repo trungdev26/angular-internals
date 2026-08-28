@@ -1,0 +1,340 @@
+<main class="idempotency-demo" aria-labelledby="demo-title">
+  <header class="hero">
+    <span>INTERACTIVE SYSTEM DESIGN DIAGRAM</span>
+    <h1 id="demo-title">Idempotency qua HTTP retry và message redelivery</h1>
+    <p>
+      Theo dõi request hoặc message đi qua từng thành phần, được lưu ở đâu và được lấy lại như thế
+      nào khi hệ thống thực thi cùng một ý định nhiều lần.
+    </p>
+  </header>
+
+  <nav class="scenario-tabs" aria-label="Chọn luồng idempotency">
+    <button
+      *ngFor="let item of scenarios; trackBy: trackById"
+      type="button"
+      [class.active]="item.id === activeScenarioId"
+      [attr.aria-pressed]="item.id === activeScenarioId"
+      (click)="selectScenario(item.id)"
+    >
+      <span>{{ item.id === 'http-retry' ? '01' : '02' }}</span>
+      <strong>{{ item.label }}</strong>
+      <small>{{ item.description }}</small>
+    </button>
+  </nav>
+
+  <section class="case-brief" aria-labelledby="case-title">
+    <div>
+      <span>KIẾN TRÚC</span>
+      <h2 id="case-title">{{ scenario.architecture }}</h2>
+      <p>{{ scenario.question }}</p>
+    </div>
+    <dl *ngIf="activeScenarioId === 'http-retry'; else kafkaIdentifiers">
+      <div>
+        <dt>Idempotency key</dt>
+        <dd>{{ idempotencyKey }}</dd>
+      </div>
+      <div>
+        <dt>Request hash</dt>
+        <dd>{{ requestHash }}</dd>
+      </div>
+      <div>
+        <dt>Business entity</dt>
+        <dd>Payment PAY-2041</dd>
+      </div>
+    </dl>
+    <ng-template #kafkaIdentifiers>
+      <dl>
+        <div>
+          <dt>Topic</dt>
+          <dd>{{ topic }}</dd>
+        </div>
+        <div>
+          <dt>Event ID</dt>
+          <dd>{{ eventId }}</dd>
+        </div>
+        <div>
+          <dt>Position</dt>
+          <dd>partition 2 · offset 418</dd>
+        </div>
+      </dl>
+    </ng-template>
+  </section>
+
+  <section class="simulation" aria-labelledby="simulation-title">
+    <div class="section-heading">
+      <div>
+        <span>03</span>
+        <strong id="simulation-title">Diagram execution</strong>
+      </div>
+      <b>Bước {{ currentStepIndex + 1 }} / {{ scenario.steps.length }}</b>
+    </div>
+
+    <div
+      class="progress"
+      role="progressbar"
+      [attr.aria-valuenow]="currentStepIndex + 1"
+      aria-valuemin="0"
+      [attr.aria-valuemax]="scenario.steps.length"
+    >
+      <div [style.width.%]="progressPercent"></div>
+    </div>
+
+    <div class="step-bar">
+      <div>
+        <span>{{ currentStep ? 'BƯỚC ĐANG CHẠY' : 'TRƯỚC KHI CHẠY' }}</span>
+        <h2>{{ currentStep?.title || 'Xác định nơi giữ trạng thái idempotency' }}</h2>
+        <p>
+          {{
+            currentStep?.detail ||
+              'Chạy từng bước để theo dõi token, storage state và kết quả business operation.'
+          }}
+        </p>
+      </div>
+      <div class="playback">
+        <div>
+          <button type="button" (click)="previousStep()" [disabled]="currentStepIndex < 0">
+            Quay lại
+          </button>
+          <button type="button" class="primary" (click)="nextStep()">
+            {{ isFinalStep ? 'Chạy lại' : 'Bước tiếp theo' }}
+          </button>
+          <button type="button" (click)="togglePlay()">
+            {{ isPlaying ? 'Tạm dừng' : 'Tự chạy' }}
+          </button>
+          <button type="button" (click)="reset()">Reset</button>
+        </div>
+        <div class="speed">
+          <span>Tốc độ</span>
+          <button type="button" [class.active]="speedMs === 1500" (click)="setSpeed(1500)">
+            0.5×
+          </button>
+          <button type="button" [class.active]="speedMs === 1000" (click)="setSpeed(1000)">
+            1×
+          </button>
+          <button type="button" [class.active]="speedMs === 550" (click)="setSpeed(550)">2×</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="diagram-scroll">
+      <svg
+        class="architecture-diagram"
+        viewBox="0 0 1072 388"
+        role="img"
+        [attr.aria-label]="
+          'Sơ đồ động ' +
+          scenario.architecture +
+          '. Bước hiện tại: ' +
+          (currentStep?.title || 'chưa chạy')
+        "
+      >
+        <defs>
+          <pattern id="diagram-grid" width="28" height="28" patternUnits="userSpaceOnUse">
+            <path d="M28 0H0V28"></path>
+          </pattern>
+          <marker
+            id="arrow-default"
+            markerWidth="9"
+            markerHeight="9"
+            refX="8"
+            refY="4.5"
+            orient="auto"
+          >
+            <path d="M0,0 L9,4.5 L0,9 z"></path>
+          </marker>
+          <marker
+            id="arrow-active"
+            markerWidth="9"
+            markerHeight="9"
+            refX="8"
+            refY="4.5"
+            orient="auto"
+          >
+            <path d="M0,0 L9,4.5 L0,9 z"></path>
+          </marker>
+        </defs>
+
+        <rect class="diagram-backdrop" x="12" y="12" width="1048" height="364" rx="22"></rect>
+        <rect class="diagram-grid" x="12" y="12" width="1048" height="364" rx="22"></rect>
+
+        <g
+          *ngFor="let zone of scenario.zones; trackBy: trackById"
+          [attr.class]="'zone zone-' + zone.tone"
+        >
+          <rect
+            [attr.x]="zone.x"
+            [attr.y]="zone.y"
+            [attr.width]="zone.width"
+            [attr.height]="zone.height"
+            rx="18"
+          ></rect>
+          <text [attr.x]="zone.x + 18" [attr.y]="zone.y + 24">{{ zone.label }}</text>
+        </g>
+
+        <g
+          *ngFor="let edge of scenario.edges; trackBy: trackById"
+          class="edge"
+          [ngClass]="edgeClass(edge)"
+        >
+          <path [attr.d]="edge.path"></path>
+          <text [attr.x]="edge.labelX" [attr.y]="edge.labelY">{{ edge.label }}</text>
+        </g>
+
+        <g
+          *ngFor="let node of scenario.nodes; trackBy: trackById"
+          class="diagram-node"
+          [ngClass]="nodeClass(node)"
+          [attr.transform]="'translate(' + node.x + ' ' + node.y + ')'"
+        >
+          <rect [attr.width]="node.width" [attr.height]="node.height" rx="14"></rect>
+          <circle cx="28" cy="30" r="15"></circle>
+          <text class="node-mark" x="28" y="34">{{ node.label.charAt(0) }}</text>
+          <text class="node-title" x="52" y="30">{{ node.label }}</text>
+          <text class="node-subtitle" x="52" y="51">{{ node.subtitle }}</text>
+          <text class="node-state" x="18" y="80">
+            {{
+              state.activeNode === node.id
+                ? currentStep?.operation
+                : node.id === 'redis'
+                  ? state.redisStatus
+                  : node.id === 'payment-db'
+                    ? state.dbIdempotencyStatus
+                    : node.id === 'kafka'
+                      ? state.kafkaStatus
+                      : 'READY'
+            }}
+          </text>
+        </g>
+
+        <g
+          class="flow-token"
+          [class.visible]="currentStep"
+          [class.tone-primary]="state.tokenTone === 'primary'"
+          [class.tone-success]="state.tokenTone === 'success'"
+          [class.tone-warning]="state.tokenTone === 'warning'"
+          [class.tone-danger]="state.tokenTone === 'danger'"
+          [attr.transform]="'translate(' + state.tokenX + ' ' + state.tokenY + ')'"
+        >
+          <circle r="17"></circle>
+          <path d="M-6 -2 L2 -2 L2 -7 L9 0 L2 7 L2 2 L-6 2 Z"></path>
+          <text y="34">{{ state.tokenLabel }}</text>
+        </g>
+      </svg>
+    </div>
+
+    <div class="storage-grid" *ngIf="activeScenarioId === 'http-retry'; else queueStorage">
+      <article [class.active]="state.activeNode === 'redis'">
+        <header>
+          <span>REDIS · OPTIONAL CACHE</span><b>{{ state.redisStatus }}</b>
+        </header>
+        <dl>
+          <div>
+            <dt>Key</dt>
+            <dd>{{ state.redisStatus === 'EMPTY' ? '—' : idempotencyKey }}</dd>
+          </div>
+          <div>
+            <dt>Cached response</dt>
+            <dd>{{ state.redisResponse }}</dd>
+          </div>
+          <div>
+            <dt>TTL</dt>
+            <dd>{{ state.redisStatus === 'EMPTY' ? '—' : '24h' }}</dd>
+          </div>
+        </dl>
+      </article>
+      <article [class.active]="state.activeNode === 'payment-db'">
+        <header>
+          <span>DATABASE · SOURCE OF TRUTH</span><b>{{ state.dbIdempotencyStatus }}</b>
+        </header>
+        <dl>
+          <div>
+            <dt>IdempotencyRequests</dt>
+            <dd>
+              {{
+                state.dbIdempotencyStatus === 'EMPTY'
+                  ? '—'
+                  : idempotencyKey + ' · ' + state.dbIdempotencyStatus
+              }}
+            </dd>
+          </div>
+          <div>
+            <dt>Stored response</dt>
+            <dd>{{ state.dbResponse }}</dd>
+          </div>
+        </dl>
+        <div class="rows" *ngIf="state.paymentIds.length; else emptyRows">
+          <code *ngFor="let id of state.paymentIds">
+            Payments · {{ id }} · Order #781 · 590.000 ₫
+          </code>
+        </div>
+        <ng-template #emptyRows><p>Chưa có payment.</p></ng-template>
+      </article>
+      <article [class.active]="state.activeNode === 'client'">
+        <header>
+          <span>CLIENT</span><b>Attempt {{ state.attempt || '—' }}</b>
+        </header>
+        <p>{{ state.response }}</p>
+      </article>
+    </div>
+
+    <ng-template #queueStorage>
+      <div class="storage-grid">
+        <article [class.active]="state.activeNode === 'kafka'">
+          <header>
+            <span>KAFKA LOG</span><b>{{ state.kafkaStatus }}</b>
+          </header>
+          <dl>
+            <div>
+              <dt>Topic</dt>
+              <dd>{{ topic }}</dd>
+            </div>
+            <div>
+              <dt>Position</dt>
+              <dd>partition 2 · offset 418</dd>
+            </div>
+            <div>
+              <dt>Delivery attempt</dt>
+              <dd>{{ state.kafkaAttempt || '—' }}</dd>
+            </div>
+          </dl>
+        </article>
+        <article [class.active]="state.activeNode === 'consumer'">
+          <header><span>CONSUMER</span><b>Accounting</b></header>
+          <p>{{ state.consumerStatus }}</p>
+        </article>
+        <article [class.active]="state.activeNode === 'inbox-db'">
+          <header><span>DATABASE TRANSACTION</span><b>Inbox + ledger</b></header>
+          <dl>
+            <div>
+              <dt>ProcessedMessages</dt>
+              <dd>{{ state.processedEventIds.length ? state.processedEventIds[0] : '—' }}</dd>
+            </div>
+            <div>
+              <dt>Ledger</dt>
+              <dd>{{ state.paymentIds.length ? state.paymentIds[0] : '—' }}</dd>
+            </div>
+          </dl>
+        </article>
+      </div>
+    </ng-template>
+
+    <app-step-history
+      [entries]="executedStepLog"
+      [totalSteps]="scenario.steps.length"
+    ></app-step-history>
+  </section>
+
+  <section class="verdict" [class.final]="isFinalStep">
+    <div><span>04</span><strong>Kết quả</strong></div>
+    <div class="verdict__content">
+      <h2>{{ state.outcome }}</h2>
+      <p>
+        {{
+          activeScenarioId === 'http-retry'
+            ? 'Redis giữ response cho retry nhanh; database vẫn cần ràng buộc nghiệp vụ để bảo vệ dữ liệu lâu dài.'
+            : 'Kafka cung cấp at-least-once delivery; Inbox và business write cùng transaction biến redelivery thành no-op.'
+        }}
+      </p>
+    </div>
+  </section>
+</main>

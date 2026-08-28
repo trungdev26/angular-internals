@@ -1,0 +1,58 @@
+<section class="step-history" aria-live="polite">
+  <header>
+    <div>
+      <span>EXECUTION LOG</span>
+      <strong>Các bước đã thực hiện</strong>
+    </div>
+    <b>{{ entries.length }} / {{ totalSteps }} bước</b>
+  </header>
+
+  <div class="history-table" *ngIf="entries.length; else emptyHistory">
+    <table>
+      <thead>
+        <tr>
+          <th>Bước</th>
+          <th>Actor</th>
+          <th>Operation</th>
+          <th>Step note</th>
+          <th>Trạng thái</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr
+          *ngFor="let entry of entries; let index = index; trackBy: trackByIndex"
+          [class.current]="index === entries.length - 1"
+        >
+          <td>
+            <span class="step-number">{{ index + 1 }}</span>
+          </td>
+          <td>
+            <span
+              class="actor-chip"
+              [class.primary]="entry.tone === 'primary'"
+              [class.secondary]="entry.tone === 'secondary'"
+            >
+              {{ entry.actor }}
+            </span>
+          </td>
+          <td>
+            <code>{{ entry.operation }}</code>
+          </td>
+          <td class="step-note">
+            <strong>{{ entry.title }}</strong>
+            <small>{{ entry.note }}</small>
+          </td>
+          <td>
+            <span class="step-status" [class.now]="index === entries.length - 1">
+              {{ index === entries.length - 1 ? 'Hiện tại' : 'Hoàn tất' }}
+            </span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <ng-template #emptyHistory>
+    <div class="empty-history">Chưa có bước nào được thực hiện.</div>
+  </ng-template>
+</section>

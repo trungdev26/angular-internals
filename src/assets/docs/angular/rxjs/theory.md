@@ -8,29 +8,6 @@ Các ví dụ trong tài liệu dùng Angular hiện đại, RxJS 7+ và TypeScr
 
 ---
 
-## Table of Contents
-
-- [1. Reactive Programming Mindset](#1-reactive-programming-mindset)
-- [2. Observable Foundation](#2-observable-foundation)
-- [3. Pipe và Operator](#3-pipe-và-operator)
-- [4. Operators by Problem](#4-operators-by-problem)
-- [5. Higher-order Observable](#5-higher-order-observable)
-- [6. Combining Streams](#6-combining-streams)
-- [7. Error Handling](#7-error-handling)
-- [8. Subject và State Primitive](#8-subject-và-state-primitive)
-- [9. Angular Integration](#9-angular-integration)
-- [10. State Design trong Angular](#10-state-design-trong-angular)
-- [11. Cache và Invalidation](#11-cache-và-invalidation)
-- [12. Lifecycle và Memory Leak](#12-lifecycle-và-memory-leak)
-- [13. RxJS và Change Detection](#13-rxjs-và-change-detection)
-- [14. Testing RxJS](#14-testing-rxjs)
-- [15. Anti-pattern thường gặp](#15-anti-pattern-thường-gặp)
-- [16. Case Studies](#16-case-studies)
-- [17. Checklist Review RxJS](#17-checklist-review-rxjs)
-- [18. Lộ trình học RxJS](#18-lộ-trình-học-rxjs)
-- [19. Tóm tắt](#19-tóm-tắt)
-
----
 
 ## 1. Reactive Programming Mindset
 
@@ -139,7 +116,15 @@ Production:
 
 ### 2.1. Observable là gì?
 
-Observable là nguồn phát dữ liệu theo thời gian.
+Observable là một object đại diện cho các giá trị sẽ được phát ra theo thời gian.
+
+Điểm khác biệt so với một mảng `number[]` bình thường: mảng chứa sẵn toàn bộ giá trị, có ngay lập tức khi đọc.
+
+```ts
+const numbers = [1, 2, 3]; // có đủ 1, 2, 3 ngay khi dòng này chạy
+```
+
+Observable thì không chứa sẵn giá trị nào cả. Nó chỉ định nghĩa **khi nào** và **bằng cách nào** các giá trị 1, 2, 3 sẽ lần lượt được phát ra — có thể ngay lập tức, có thể sau vài giây (chờ HTTP response), có thể nhiều lần (mỗi lần user gõ phím), hoặc thậm chí không bao giờ nếu không ai subscribe.
 
 ```ts
 const numbers$ = new Observable<number>(subscriber => {
@@ -169,7 +154,80 @@ Kết quả:
 done
 ```
 
-Một Observable có 3 loại tín hiệu:
+Observable dễ hiểu nhầm nhất ở điểm này, nên so sánh với thứ đã quen thuộc: khai báo một function.
+
+```ts
+function loadNumbers() {
+  console.log('đang chạy');
+  return [1, 2, 3];
+}
+```
+
+Dòng code trên chỉ **định nghĩa** hàm `loadNumbers`. Nó chưa in ra `'đang chạy'`, chưa trả về gì cả. Phải đợi đến khi có ai đó gọi `loadNumbers()` thì phần thân hàm mới thực sự chạy.
+
+Observable hoạt động theo đúng tinh thần đó:
+
+```ts
+const numbers$ = new Observable<number>(subscriber => {
+  console.log('đang chạy');
+  subscriber.next(1);
+  subscriber.next(2);
+  subscriber.next(3);
+});
+```
+
+Dòng code này cũng chỉ **định nghĩa** cách phát dữ liệu, chưa chạy gì cả — giống hệt việc định nghĩa `loadNumbers` ở trên. Khác biệt duy nhất so với function thường:
+
+```text
+function thường:  gọi 1 lần -> trả về 1 giá trị (return), rồi kết thúc.
+Observable:       gọi subscribe() -> có thể phát nhiều giá trị (next) theo thời gian.
+```
+
+Tóm lại có 3 điểm cần nhớ:
+
+```text
+1. new Observable(subscriber => {...}) chỉ là khai báo, tương tự khai báo một function.
+   Bản thân dòng khai báo không làm gì cả.
+
+2. Hàm subscriber => {...} truyền vào gọi là producer function.
+   Đây là nơi thật sự phát ra dữ liệu (next/error/complete).
+
+3. Producer function không tự chạy khi khai báo.
+   Nó chỉ chạy khi có subscriber gọi subscribe() — giống việc gọi loadNumbers().
+```
+
+```ts
+const numbers$ = new Observable<number>(subscriber => {
+  console.log('producer function chạy');
+  subscriber.next(1);
+});
+
+console.log('trước subscribe');
+numbers$.subscribe(value => console.log('nhận', value));
+console.log('sau subscribe');
+```
+
+Kết quả:
+
+```text
+trước subscribe
+producer function chạy
+nhận 1
+sau subscribe
+```
+
+Tóm lại, cần nhớ 2 điều sau về Observable:
+
+```text
+Khai báo numbers$ chỉ là mô tả, chưa làm gì cả.
+Không có subscriber -> producer function không bao giờ chạy.
+Có subscriber gọi subscribe() -> producer function mới chạy.
+Mỗi lần subscribe -> producer function chạy lại từ đầu (trừ khi stream được share, xem 2.5-2.7).
+```
+
+Đây là lý do vì sao trong Angular, chỉ khai báo `this.api.getPatients()` mà không subscribe thì sẽ không có request nào được gửi đi.
+
+Một Observable có 3 loại tín hiệu, phát ra qua object `subscriber`:
 
 ```text
 next(value)
@@ -182,13 +240,23 @@ complete()
 -> stream hoàn thành
 ```
 
+Có thể hình dung theo timeline (marble diagram):
+
+```text
+next  next  next  complete
+--1----2----3------|-->
+
+next  next  error
+--1----2------X-->
+```
+
 Một stream chỉ có thể kết thúc bằng một trong hai cách:
 
 ```text
 complete hoặc error
 ```
 
-Sau khi `complete` hoặc `error`, stream đó không emit thêm value nữa.
+Sau khi `complete` hoặc `error`, stream đó không emit thêm value nữa. Gọi `next` sau khi đã `complete`/`error` là vô nghĩa vì subscriber đã ngừng lắng nghe.
 
 ### 2.2. Quy ước đặt tên `$`
 
@@ -211,7 +279,7 @@ Không bắt buộc về mặt kỹ thuật, nhưng rất nên thống nhất tr
 
 ### 2.3. Observer
 
-Observer là object nhận dữ liệu từ Observable.
+Observer là object nhận dữ liệu từ Observable, gồm 3 callback tương ứng với 3 tín hiệu ở mục 2.1.
 
 ```ts
 const observer = {
@@ -223,7 +291,31 @@ const observer = {
 numbers$.subscribe(observer);
 ```
 
-Trong thực tế Angular, nhiều code chỉ truyền callback `next`:
+`subscribe(observer)` làm 2 việc theo đúng thứ tự sau:
+
+```text
+1. Chạy producer function của Observable (phần subscriber => {...} ở mục 2.1).
+
+2. Bên trong producer function, mỗi lần gọi subscriber.next/error/complete
+   thì RxJS gọi ngược lại đúng hàm tương ứng trên observer:
+
+   subscriber.next(value)     -> gọi observer.next(value)
+   subscriber.error(err)      -> gọi observer.error(err)
+   subscriber.complete()      -> gọi observer.complete()
+```
+
+Nói cách khác, `subscriber` và `observer` là hai đầu của cùng một đường ống: code bên trong Observable gọi `subscriber.next(...)`, còn code gọi `subscribe(observer)` nhận lại giá trị đó qua `observer.next(...)`.
+
+Observer tuân theo một contract cố định, không phụ thuộc Observable cụ thể nào:
+
+```text
+next    -> có thể được gọi 0 hoặc nhiều lần
+error   -> được gọi tối đa 1 lần; nếu gọi thì stream kết thúc, không còn next/complete nào sau đó
+complete -> được gọi tối đa 1 lần; nếu gọi thì stream kết thúc, không còn next nào sau đó
+error và complete không bao giờ cùng xảy ra trên một stream
+```
+
+Observer là **partial object**: cả 3 field đều không bắt buộc. Trong thực tế Angular, nhiều code chỉ truyền callback `next`:
 
 ```ts
 this.api.getPatients().subscribe(patients => {
@@ -231,13 +323,30 @@ this.api.getPatients().subscribe(patients => {
 });
 ```
 
-Nhưng khi code production, nên nghĩ đủ 3 trạng thái:
+Cách viết này tương đương truyền một Observer chỉ có `next`, thiếu `error` và `complete`. Đây là chỗ dễ tạo bug âm thầm: nếu stream error mà không có `error` handler, RxJS không nuốt lỗi đó đi mà **throw ra ngoài như một uncaught exception**, không đi qua logic xử lý nào của component.
+
+```ts
+this.api.getPatients().subscribe(patients => {
+  this.patients = patients;
+});
+```
 
 ```text
-- Khi có data thì làm gì?
-- Khi lỗi thì làm gì?
-- Khi hoàn thành thì có cần cleanup không?
+Nếu API trả lỗi:
+-> không có patients nào được gán
+-> lỗi bị throw ra console dưới dạng uncaught error
+-> không có cách nào bắt lại lỗi này từ subscribe call trên
 ```
+
+Vì vậy khi code production, nên nghĩ đủ 3 trạng thái mỗi khi subscribe thủ công:
+
+```text
+- Khi có data thì làm gì? (next)
+- Khi lỗi thì làm gì? (error)
+- Khi hoàn thành thì có cần cleanup không? (complete)
+```
+
+Lưu ý Observer khác Subscription: Observer mô tả **cách xử lý** next/error/complete, còn Subscription (xem 2.4) là **handle để hủy** việc lắng nghe đó.
 
 ### 2.4. Subscription
 

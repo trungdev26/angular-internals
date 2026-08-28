@@ -1,4 +1,4 @@
-# Case Study 01. Authenticate Shared Global
+# Authenticate Shared Global
 
 Case này xử lý một bài toán Angular production rất hay gặp: thông tin đăng nhập, user hiện tại, quyền, tenant/branch và token cần được nhiều nơi dùng chung, nhưng nếu gom tất cả vào một `AuthService` global thì rất dễ phình to, circular dependency, stale state và khó test.
 

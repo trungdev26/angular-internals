@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(volta --version)",
-      "Bash(volta pin *)"
+      "Bash(volta pin *)",
+      "WebFetch(domain:angular.dev)"
     ]
   }
 }

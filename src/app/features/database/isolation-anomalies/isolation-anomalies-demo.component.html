@@ -1,0 +1,213 @@
+<section class="isolation-demo">
+  <header class="hero">
+    <span>INTERACTIVE ISOLATION LAB</span>
+    <h2>Isolation Anomalies</h2>
+    <p>
+      Theo dõi hai transaction xen kẽ trên cùng dữ liệu. Chuyển isolation strategy để quan sát
+      anomaly xuất hiện ở observation nào và cơ chế nào ngăn nó.
+    </p>
+  </header>
+
+  <nav class="lab-tabs" aria-label="Isolation anomaly scenarios">
+    <button
+      *ngFor="let lab of labs; let index = index"
+      type="button"
+      [class.active]="lab.id === activeLab"
+      (click)="selectLab(lab.id)"
+    >
+      <span>LAB 0{{ index + 1 }}</span>
+      <strong>{{ lab.label }}</strong>
+      <small>{{ lab.description }}</small>
+    </button>
+  </nav>
+
+  <section class="case-brief">
+    <div>
+      <span class="case-kicker">BÀI TOÁN</span>
+      <h3>{{ activeLabInfo.caseTitle }}</h3>
+      <p>{{ activeLabInfo.context }}</p>
+    </div>
+    <div class="case-analysis">
+      <span>HIỆN TƯỢNG</span>
+      <p>{{ activeLabInfo.symptom }}</p>
+      <span>CẦN XÁC ĐỊNH</span>
+      <p>{{ activeLabInfo.question }}</p>
+    </div>
+  </section>
+
+  <section class="strategy">
+    <div>
+      <span>01</span>
+      <strong>Chọn isolation strategy</strong>
+    </div>
+    <div class="segmented">
+      <button type="button" [class.active]="mode === 'exposed'" (click)="setMode('exposed')">
+        {{ activeLabInfo.exposedLabel }}
+      </button>
+      <button type="button" [class.active]="mode === 'protected'" (click)="setMode('protected')">
+        {{ activeLabInfo.protectedLabel }}
+      </button>
+    </div>
+  </section>
+
+  <section class="simulation">
+    <div class="section-heading">
+      <div>
+        <span>02</span>
+        <strong>Chạy transaction timeline</strong>
+      </div>
+      <b>Bước {{ currentStepIndex + 1 }} / {{ steps.length }}</b>
+    </div>
+
+    <div class="progress"><div [style.width.%]="progressPercent"></div></div>
+
+    <div class="step-bar">
+      <div>
+        <span>{{ currentStep ? 'BƯỚC ĐANG CHẠY' : 'TRƯỚC KHI CHẠY' }}</span>
+        <h3>{{ currentStep?.title || 'Dự đoán anomaly trước khi mô phỏng' }}</h3>
+        <p>
+          {{
+            currentStep?.detail ||
+              'Chạy từng bước và phân biệt committed state, pending write và transaction snapshot.'
+          }}
+        </p>
+      </div>
+      <div class="playback">
+        <div>
+          <button
+            type="button"
+            (click)="previousStep()"
+            [disabled]="currentStepIndex < 0 || isPlaying"
+          >
+            Quay lại
+          </button>
+          <button type="button" class="primary" (click)="nextStep()" [disabled]="isPlaying">
+            {{ currentStepIndex >= steps.length - 1 ? 'Chạy lại' : 'Bước tiếp theo' }}
+          </button>
+          <button type="button" (click)="togglePlay()">
+            {{ isPlaying ? 'Tạm dừng' : 'Tự chạy' }}
+          </button>
+        </div>
+        <div class="speed">
+          <span>Tốc độ</span>
+          <button type="button" [class.active]="speedMs === 1500" (click)="setSpeed(1500)">
+            0.5×
+          </button>
+          <button type="button" [class.active]="speedMs === 1000" (click)="setSpeed(1000)">
+            1×
+          </button>
+          <button type="button" [class.active]="speedMs === 550" (click)="setSpeed(550)">2×</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="anomaly-stage">
+      <div class="operation-track">
+        <span>T1</span>
+        <span>SHARED DATA</span>
+        <span>T2</span>
+        <div #operationToken class="operation-token">
+          {{ currentStep?.action || 'READY' }}
+        </div>
+      </div>
+
+      <div class="anomaly-layout">
+        <article class="transaction-card" [class.active]="currentStep?.actor === 't1'">
+          <span>TRANSACTION T1</span>
+          <strong>{{ t1State }}</strong>
+        </article>
+
+        <div #dataPanel class="data-panel" [ngSwitch]="activeLab">
+          <ng-container *ngSwitchCase="'dirty-read'">
+            <span class="data-label">Accounts · ID #7</span>
+            <div class="metric">
+              <small>COMMITTED</small>
+              <strong>Balance = {{ balanceCommitted }}</strong>
+            </div>
+            <div class="pending-write" *ngIf="balancePending !== null">
+              T1 pending write · {{ balancePending }}
+            </div>
+            <div class="observation">
+              T2 observed ·
+              <b>{{ t2ObservedBalance === null ? '—' : t2ObservedBalance }}</b>
+            </div>
+          </ng-container>
+
+          <ng-container *ngSwitchCase="'non-repeatable'">
+            <span class="data-label">Products · ID #42</span>
+            <div class="metric">
+              <small>LATEST COMMITTED</small>
+              <strong>Price = {{ priceCurrent }}</strong>
+            </div>
+            <div class="read-pair">
+              <span
+                >Read #1 <b>{{ firstPriceRead ?? '—' }}</b></span
+              >
+              <span
+                >Read #2 <b>{{ secondPriceRead ?? '—' }}</b></span
+              >
+            </div>
+          </ng-container>
+
+          <ng-container *ngSwitchCase="'phantom'">
+            <span class="data-label">WHERE Status = 'OPEN'</span>
+            <div class="order-list">
+              <span *ngFor="let id of orderIds" [class.phantom-row]="id === 103">
+                Order #{{ id }}
+              </span>
+            </div>
+            <div class="read-pair">
+              <span
+                >Count #1 <b>{{ firstOrderCount ?? '—' }}</b></span
+              >
+              <span
+                >Count #2 <b>{{ secondOrderCount ?? '—' }}</b></span
+              >
+            </div>
+            <div class="blocked" *ngIf="insertBlocked">Order #103 đang chờ range lock</div>
+          </ng-container>
+
+          <ng-container *ngSwitchCase="'write-skew'">
+            <span class="data-label">Invariant · COUNT(on_call) ≥ 1</span>
+            <div class="doctor-grid">
+              <div [class.off]="!doctorAOnCall">
+                <small>DOCTOR A</small>
+                <strong>{{ doctorAOnCall ? 'ON CALL' : 'OFF' }}</strong>
+              </div>
+              <div [class.off]="!doctorBOnCall">
+                <small>DOCTOR B</small>
+                <strong>{{ doctorBOnCall ? 'ON CALL' : 'OFF' }}</strong>
+              </div>
+            </div>
+            <div class="invariant" [class.broken]="onCallCount === 0">
+              On-call count = {{ onCallCount }}
+            </div>
+            <div class="blocked" *ngIf="serializationFailure">
+              T2 bị abort bởi serialization failure
+            </div>
+          </ng-container>
+        </div>
+
+        <article class="transaction-card" [class.active]="currentStep?.actor === 't2'">
+          <span>TRANSACTION T2</span>
+          <strong>{{ t2State }}</strong>
+        </article>
+      </div>
+    </div>
+
+    <app-step-history [entries]="executedStepLog" [totalSteps]="steps.length"></app-step-history>
+  </section>
+
+  <section
+    class="verdict"
+    [class.final]="currentStepIndex === steps.length - 1"
+    [class.danger]="currentStepIndex === steps.length - 1 && mode === 'exposed'"
+  >
+    <div>
+      <span>03</span>
+      <strong>Kết quả phân tích</strong>
+    </div>
+    <h3>{{ verdictTitle }}</h3>
+    <p>{{ verdictDetail }}</p>
+  </section>
+</section>

@@ -40,6 +40,10 @@ import {
   ReloadOutline,
   SafetyOutline,
   SafetyCertificateOutline,
+  SkinOutline,
+  AppstoreOutline,
+  HighlightOutline,
+  TagOutline,
 } from '@ant-design/icons-angular/icons';
 import { NzImageModule } from 'ng-zorro-antd/image';
 import { NzInputNumberModule } from 'ng-zorro-antd/input-number';
@@ -59,6 +63,16 @@ import { FpsMeterComponent } from './base/components/fps-meter/fps-meter.compone
 import { RiskScorePipe } from './features/change-detection/pipes/risk-score.pipe';
 import { ClusterDemoComponent } from './features/system-design/cluster/cluster-demo.component';
 import { ClusterTheoryComponent } from './features/system-design/cluster/cluster-theory.component';
+import { LoadParameterDemoComponent } from './features/system-design/load-parameter/load-parameter-demo.component';
+import { IdempotencyDemoComponent } from './features/system-design/idempotency/idempotency-demo.component';
+import { StorageIoDemoComponent } from './features/database/storage-io/storage-io-demo.component';
+import { IndexDemoComponent } from './features/database/index/index-demo.component';
+import { ExecutionPlanDemoComponent } from './features/database/execution-plan/execution-plan-demo.component';
+import { TransactionDemoComponent } from './features/database/transactions/transaction-demo.component';
+import { OutboxFlowDemoComponent } from './features/database/transactions/outbox-flow-demo.component';
+import { IsolationAnomaliesDemoComponent } from './features/database/isolation-anomalies/isolation-anomalies-demo.component';
+import { StepHistoryComponent } from './features/database/shared/step-history/step-history.component';
+import { AdvancedSqlDemoComponent } from './features/database/advanced-sql/advanced-sql-demo.component';
 
 registerLocaleData(en);
 
@@ -75,6 +89,16 @@ registerLocaleData(en);
     RiskScorePipe,
     ClusterDemoComponent,
     ClusterTheoryComponent,
+    LoadParameterDemoComponent,
+    IdempotencyDemoComponent,
+    StorageIoDemoComponent,
+    IndexDemoComponent,
+    ExecutionPlanDemoComponent,
+    TransactionDemoComponent,
+    OutboxFlowDemoComponent,
+    IsolationAnomaliesDemoComponent,
+    StepHistoryComponent,
+    AdvancedSqlDemoComponent,
   ],
   imports: [
     BrowserModule,
@@ -107,6 +131,10 @@ registerLocaleData(en);
       ReloadOutline,
       SafetyOutline,
       SafetyCertificateOutline,
+      SkinOutline,
+      AppstoreOutline,
+      HighlightOutline,
+      TagOutline,
     ]),
     NzImageModule,
     NzInputNumberModule,

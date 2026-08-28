@@ -1,0 +1,157 @@
+<section class="outbox-simulator" [class.direct-mode]="mode === 'direct'">
+  <header>
+    <div>
+      <span>EVENT</span>
+      <strong>OrderCreated · EVT-1001</strong>
+    </div>
+    <b>{{
+      mode === 'direct' ? 'Hai hệ thống · không cùng transaction' : 'Durable intent · relay độc lập'
+    }}</b>
+  </header>
+
+  <div class="flow-canvas">
+    <svg viewBox="0 0 1120 270" role="img" aria-label="Mô phỏng Transactional Outbox">
+      <defs>
+        <marker id="flow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z"></path>
+        </marker>
+      </defs>
+
+      <ng-container *ngIf="mode === 'direct'; else outboxFlow">
+        <path class="flow-line" d="M165 158 H258"></path>
+        <path class="flow-line failure-line" d="M422 158 H850"></path>
+        <text class="failure-window" x="720" y="205">FAILURE WINDOW · COMMIT → PUBLISH</text>
+
+        <g class="flow-node" [class.active]="stepIndex >= 0" transform="translate(25 108)">
+          <rect width="140" height="100" rx="12"></rect>
+          <text class="node-type" x="70" y="27">APPLICATION</text>
+          <text class="node-title" x="70" y="52">Order Service</text>
+          <text class="node-state" x="70" y="77">{{ processState }}</text>
+        </g>
+
+        <g
+          class="flow-node database"
+          [class.active]="stepIndex >= 1"
+          transform="translate(258 108)"
+        >
+          <rect width="164" height="100" rx="12"></rect>
+          <text class="node-type" x="82" y="27">DATABASE</text>
+          <text class="node-title" x="82" y="52">Orders</text>
+          <text class="node-state" x="82" y="77">{{ orderState }}</text>
+        </g>
+
+        <g class="flow-node broker" transform="translate(850 108)">
+          <rect width="170" height="100" rx="12"></rect>
+          <text class="node-type" x="85" y="27">MESSAGE BROKER</text>
+          <text class="node-title" x="85" y="52">OrderCreated</text>
+          <text class="node-state danger" x="85" y="77">{{ eventState }}</text>
+        </g>
+
+        <g *ngIf="directEventLost" class="crash-point" transform="translate(650 158)">
+          <circle r="30"></circle>
+          <text y="-2">CRASH</text>
+          <text class="crash-subtitle" y="14">event bị mất</text>
+        </g>
+      </ng-container>
+
+      <ng-template #outboxFlow>
+        <rect class="transaction-boundary" x="205" y="92" width="350" height="134" rx="16"></rect>
+        <text class="boundary-label" x="380" y="86">CÙNG DATABASE TRANSACTION</text>
+
+        <path class="flow-line" d="M160 158 H210"></path>
+        <path class="flow-line" d="M390 158 H400"></path>
+        <path class="flow-line" d="M540 158 H590"></path>
+        <path class="flow-line" d="M730 158 H780"></path>
+        <path class="flow-line" d="M920 158 H970"></path>
+
+        <g class="flow-node" [class.active]="stepIndex >= 0" transform="translate(20 108)">
+          <rect width="140" height="100" rx="12"></rect>
+          <text class="node-type" x="70" y="27">APPLICATION</text>
+          <text class="node-title" x="70" y="52">Order Service</text>
+          <text class="node-state" x="70" y="77">{{ processState }}</text>
+        </g>
+
+        <g
+          class="flow-node database"
+          [class.active]="stepIndex >= 1"
+          transform="translate(210 108)"
+        >
+          <rect width="180" height="100" rx="12"></rect>
+          <text class="node-type" x="90" y="27">DATABASE</text>
+          <text class="node-title" x="90" y="52">Orders</text>
+          <text class="node-state" x="90" y="77">{{ orderState }}</text>
+        </g>
+
+        <g class="flow-node outbox" [class.active]="stepIndex >= 1" transform="translate(400 108)">
+          <rect width="140" height="100" rx="12"></rect>
+          <text class="node-type" x="70" y="27">DATABASE</text>
+          <text class="node-title" x="70" y="52">Outbox</text>
+          <text class="node-state" x="70" y="77">{{ outboxState }}</text>
+        </g>
+
+        <g class="flow-node relay" [class.active]="relayActive" transform="translate(590 108)">
+          <rect width="140" height="100" rx="12"></rect>
+          <text class="node-type" x="70" y="27">WORKER</text>
+          <text class="node-title" x="70" y="52">Outbox Relay</text>
+          <text class="node-state" x="70" y="77">
+            {{ relayActive ? 'Đang xử lý' : 'Chờ poll' }}
+          </text>
+        </g>
+
+        <g
+          class="flow-node broker"
+          [class.active]="deliveryCount > 0"
+          transform="translate(780 108)"
+        >
+          <rect width="140" height="100" rx="12"></rect>
+          <text class="node-type" x="70" y="27">BROKER</text>
+          <text class="node-title" x="70" y="52">OrderCreated</text>
+          <text class="node-state" x="70" y="77">
+            {{ deliveryCount ? 'Delivery × ' + deliveryCount : 'Chưa nhận' }}
+          </text>
+        </g>
+
+        <g
+          class="flow-node consumer"
+          [class.active]="consumerActive"
+          transform="translate(970 108)"
+        >
+          <rect width="130" height="100" rx="12"></rect>
+          <text class="node-type" x="65" y="27">CONSUMER</text>
+          <text class="node-title" x="65" y="52">Inventory</text>
+          <text class="node-state" x="65" y="72">
+            {{ consumerActive ? 'Áp dụng 1 lần' : 'Chưa nhận' }}
+          </text>
+          <text *ngIf="consumerActive" class="node-note" x="65" y="88">Duplicate bị bỏ qua</text>
+        </g>
+
+        <g
+          *ngIf="processCrashed && stepIndex === 3"
+          class="process-crash"
+          transform="translate(90 226)"
+        >
+          <rect x="-64" width="128" height="28" rx="14"></rect>
+          <text x="0" y="18">PROCESS CRASH</text>
+        </g>
+
+        <g *ngIf="outboxDurable" class="durable-badge" transform="translate(470 238)">
+          <rect x="-75" width="150" height="28" rx="14"></rect>
+          <text x="0" y="18">Message vẫn durable</text>
+        </g>
+      </ng-template>
+
+      <g
+        #eventToken
+        class="event-token"
+        [class.hidden]="!directTokenVisible"
+        [class.lost]="directEventLost"
+        [class.duplicate]="deliveryCount > 1"
+        [attr.transform]="mode === 'direct' ? 'translate(480 158)' : 'translate(90 56)'"
+      >
+        <rect x="-57" y="-17" width="114" height="34" rx="17"></rect>
+        <circle cx="-40" r="5"></circle>
+        <text x="8" y="4">OrderCreated</text>
+      </g>
+    </svg>
+  </div>
+</section>

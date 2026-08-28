@@ -1,4 +1,4 @@
-# 06. Code review và refactor như Middle/Senior
+# Code review và refactor như Middle/Senior
 
 Code review không chỉ là bắt format. Review tốt giúp bắt bug, giữ kiến trúc, giảm nợ maintain và làm team cùng nâng chuẩn.
 

@@ -2796,7 +2796,7 @@ Trong cluster, debug bằng cách SSH vào một server để xem log là không
 
 ---
 
-#### 26.22. Case Study: Hàng chờ khám bệnh
+#### 26.22. Hàng chờ khám bệnh
 
 #### Thiết kế sai khi dùng biến trong memory
 
@@ -2839,7 +2839,7 @@ Với nghiệp vụ y tế, dù dùng Redis `INCR` để cấp số nhanh, vẫn
 
 ---
 
-#### 26.23. Case Study: Thông báo realtime CLS / phiếu khám
+#### 26.23. Thông báo realtime CLS / phiếu khám
 
 ```mermaid
 sequenceDiagram

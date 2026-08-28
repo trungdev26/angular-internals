@@ -1,0 +1,202 @@
+<section class="index-demo" aria-labelledby="index-demo-title">
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Mô phỏng tương tác</p>
+      <h2 id="index-demo-title">Đường đi của truy vấn qua Index</h2>
+      <p>
+        Quan sát số page và row database phải xử lý khi cùng một predicate được thực thi bằng Table
+        Scan, B+Tree Index Seek hoặc Nonclustered Index kết hợp Key Lookup.
+      </p>
+    </div>
+
+    <div class="hero__query" aria-label="Câu truy vấn đang mô phỏng">
+      <span>Query</span>
+      <code>{{ queryText }}</code>
+    </div>
+  </header>
+
+  <div class="mode-grid" role="group" aria-label="Phương thức truy cập dữ liệu">
+    <button
+      type="button"
+      class="mode-card"
+      *ngFor="let mode of modes"
+      [class.mode-card--active]="activeMode === mode.id"
+      [attr.aria-pressed]="activeMode === mode.id"
+      (click)="selectMode(mode.id)"
+    >
+      <strong>{{ mode.label }}</strong>
+      <span>{{ mode.description }}</span>
+    </button>
+  </div>
+
+  <section class="control-bar" aria-label="Điều khiển mô phỏng">
+    <label class="target-control">
+      <span>Khóa cần tìm</span>
+      <div>
+        <input
+          type="range"
+          min="1"
+          max="32"
+          step="1"
+          [value]="targetKey"
+          (input)="setTarget($any($event.target).valueAsNumber)"
+        />
+        <output>{{ targetKey }}</output>
+      </div>
+    </label>
+
+    <label class="covering-control" *ngIf="activeMode === 'lookup'">
+      <input
+        type="checkbox"
+        [checked]="coveringIndex"
+        (change)="setCoveringIndex($any($event.target).checked)"
+      />
+      <span>Covering Index</span>
+      <small>{{ indexDefinition }}</small>
+    </label>
+
+    <div class="playback">
+      <button type="button" class="action action--primary" (click)="togglePlay()">
+        {{
+          isPlaying
+            ? 'Tạm dừng'
+            : currentStepIndex >= steps.length - 1
+              ? 'Chạy lại'
+              : 'Tự động chạy'
+        }}
+      </button>
+      <button type="button" class="action" [disabled]="isPlaying" (click)="nextStep()">
+        Bước tiếp theo
+      </button>
+      <button type="button" class="action" (click)="reset()">Đặt lại</button>
+      <div class="speed" role="group" aria-label="Tốc độ mô phỏng">
+        <button type="button" [class.speed--active]="speedMs === 1100" (click)="setSpeed(1100)">
+          0.5×
+        </button>
+        <button type="button" [class.speed--active]="speedMs === 700" (click)="setSpeed(700)">
+          1×
+        </button>
+        <button type="button" [class.speed--active]="speedMs === 350" (click)="setSpeed(350)">
+          2×
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <div class="progress-track" aria-hidden="true">
+    <span [style.width.%]="progressPercent"></span>
+  </div>
+
+  <section class="stage" [attr.aria-label]="'Mô phỏng ' + activeMode">
+    <div class="step-copy">
+      <span>Bước {{ currentStepIndex + 1 }} / {{ steps.length }}</span>
+      <strong>{{ currentStep?.title || 'Sẵn sàng mô phỏng' }}</strong>
+      <p>
+        {{
+          currentStep?.detail ||
+            'Chọn phương thức truy cập, khóa cần tìm và chạy từng bước để theo dõi đường đi của truy vấn.'
+        }}
+      </p>
+    </div>
+
+    <div class="tree-panel" *ngIf="activeMode !== 'scan'">
+      <div class="panel-label">
+        <span>{{ activeMode === 'lookup' ? 'Nonclustered B+Tree' : 'Clustered B+Tree' }}</span>
+        <small>Đường màu xanh biểu thị page đã được đọc</small>
+      </div>
+
+      <svg
+        class="tree"
+        viewBox="0 0 1000 330"
+        role="img"
+        aria-labelledby="tree-title tree-desc"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <title id="tree-title">Cây B+Tree ba tầng</title>
+        <desc id="tree-desc">
+          Root Page dẫn tới hai Branch Page và tám Leaf Page chứa các khóa từ 1 đến 32.
+        </desc>
+
+        <line
+          *ngFor="let edge of treeEdges"
+          [attr.x1]="edge.x1"
+          [attr.y1]="edge.y1"
+          [attr.x2]="edge.x2"
+          [attr.y2]="edge.y2"
+          class="tree-edge"
+          [class.tree-edge--visited]="isEdgeVisited(edge)"
+        ></line>
+
+        <g
+          *ngFor="let node of treeNodes"
+          class="tree-node"
+          [class.tree-node--visited]="isNodeVisited(node.id)"
+          [class.tree-node--active]="isNodeActive(node.id)"
+          [attr.transform]="'translate(' + node.x + ' ' + node.y + ')'"
+        >
+          <rect [attr.width]="node.width" height="60" rx="10"></rect>
+          <text [attr.x]="node.width / 2" y="23" class="tree-node__title">{{ node.title }}</text>
+          <text [attr.x]="node.width / 2" y="44" class="tree-node__keys">{{ node.keys }}</text>
+        </g>
+      </svg>
+    </div>
+
+    <div class="pages-panel">
+      <div class="panel-label">
+        <span>Data Pages</span>
+        <small>Mỗi page chứa bốn row trong mô hình minh họa</small>
+      </div>
+
+      <div class="pages">
+        <article
+          class="data-page"
+          *ngFor="let page of dataPages; trackBy: trackById"
+          [class.data-page--visited]="isPageVisited(page.id)"
+          [class.data-page--active]="isPageActive(page.id)"
+        >
+          <header>Page {{ page.id }}</header>
+          <div class="rows">
+            <span
+              *ngFor="let value of page.values; trackBy: trackByValue"
+              [class.row--active]="isValueActive(value)"
+              [class.row--target]="value === targetKey"
+            >
+              {{ value }}
+            </span>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="metrics" aria-label="Chi phí thực thi hiện tại">
+    <div>
+      <span>Page Reads</span>
+      <strong>{{ pagesRead }}</strong>
+      <small>page đã truy cập</small>
+    </div>
+    <div>
+      <span>Rows Examined</span>
+      <strong>{{ rowsExamined }}</strong>
+      <small>row đã so sánh</small>
+    </div>
+    <div>
+      <span>Key Lookups</span>
+      <strong>{{ lookups }}</strong>
+      <small>lần quay về Data Page</small>
+    </div>
+    <div>
+      <span>Kết quả</span>
+      <strong [class.metric-found]="currentStep?.found">{{
+        currentStep?.found ? 'Found' : '—'
+      }}</strong>
+      <small>Id = {{ targetKey }}</small>
+    </div>
+  </section>
+
+  <p class="model-note">
+    Mô hình dùng cây ba tầng và page nhỏ để quan sát đường đi. Database thực tế có fan-out lớn hơn,
+    nhiều page hơn và optimizer quyết định access path dựa trên statistics, cardinality và chi phí
+    ước lượng.
+  </p>
+</section>

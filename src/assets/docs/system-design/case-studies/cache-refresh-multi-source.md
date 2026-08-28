@@ -1,4 +1,4 @@
-# Case Study 01. Refresh cache từ DB và 3rd-party status
+# Refresh cache từ DB và 3rd-party status
 
 Case này mô phỏng một bài toán backend production: API cần hiển thị trạng thái mới nhất của thiết bị, đơn hàng, kết nối đối tác hoặc dịch vụ, nhưng trạng thái đó đến từ cả DB nội bộ và 3rd-party.
 

@@ -1,786 +1,606 @@
-# Transactions trong Database
+# Transaction và tính nhất quán trong Database
 
-Transaction là cơ chế giúp một nhóm thao tác dữ liệu được xử lý như một đơn vị công việc thống nhất. Hoặc tất cả thay đổi cùng thành công, hoặc khi có lỗi thì database đưa dữ liệu về trạng thái trước đó.
-
-Ví dụ kinh điển là chuyển tiền:
+Transaction là một đơn vị công việc gồm một hoặc nhiều thao tác dữ liệu. Database chỉ công nhận kết quả cuối cùng khi toàn bộ đơn vị công việc đáp ứng điều kiện commit; nếu không, các thay đổi thuộc transaction phải được hoàn tác.
 
 ```text
-Trừ 1.000.000 từ tài khoản A
-Cộng 1.000.000 vào tài khoản B
+Trạng thái hợp lệ A
+        ↓
+Transaction
+        ↓
+Commit   → Trạng thái hợp lệ B
+Rollback → Trở về trạng thái trước transaction
 ```
 
-Nếu chỉ trừ tiền A thành công rồi hệ thống lỗi trước khi cộng tiền B, dữ liệu sẽ sai. Transaction sinh ra để ngăn kiểu lỗi này.
+Transaction không chỉ là cú pháp `BEGIN`, `COMMIT` và `ROLLBACK`. Một thiết kế đúng phải trả lời được:
+
+- Invariant nào cần được bảo vệ?
+- Những thay đổi nào phải commit cùng nhau?
+- Request đồng thời có thể tạo ra xung đột nào?
+- Transaction được mở trong bao lâu?
+- Điều gì xảy ra nếu process dừng ngay trước hoặc sau commit?
+- Side effect ngoài database được đồng bộ bằng cơ chế nào?
 
 ---
 
-## 1. Transaction giải quyết vấn đề gì?
+## Index
 
-Trong hệ thống thật, một nghiệp vụ thường không chỉ ghi một dòng.
-
-Ví dụ tạo đơn hàng:
-
-```text
-1. Tạo Order
-2. Tạo OrderItems
-3. Trừ tồn kho
-4. Ghi lịch sử tồn kho
-5. Cập nhật công nợ
-```
-
-Nếu bước 1, 2 thành công nhưng bước 3 thất bại, dữ liệu sẽ rơi vào trạng thái nửa vời. Transaction giúp gom các bước cần nhất quán mạnh vào cùng một phạm vi.
-
-```sql
-BEGIN TRANSACTION;
-
-INSERT INTO Orders(CustomerId, TotalAmount)
-VALUES (10, 500000);
-
-INSERT INTO OrderItems(OrderId, ProductId, Quantity, Price)
-VALUES (1001, 20, 2, 250000);
-
-UPDATE Products
-SET StockQuantity = StockQuantity - 2
-WHERE Id = 20;
-
-COMMIT;
-```
-
-Nếu có lỗi:
-
-```sql
-ROLLBACK;
-```
-
-Nói ngắn gọn:
-
-```text
-Transaction bảo vệ tính đúng đắn khi một nghiệp vụ cần nhiều thao tác dữ liệu đi cùng nhau.
-```
+1. [Invariant và phạm vi transaction](#1-invariant-và-phạm-vi-transaction)
+2. [ACID và lifecycle thực thi](#2-acid-và-lifecycle-thực-thi)
+3. [Isolation trong môi trường đồng thời](#3-isolation-trong-môi-trường-đồng-thời)
+4. [Các mẫu cập nhật an toàn](#4-các-mẫu-cập-nhật-an-toàn)
+5. [Transaction boundary trong application](#5-transaction-boundary-trong-application)
+6. [Side effect và tính nhất quán ngoài database](#6-side-effect-và-tính-nhất-quán-ngoài-database)
+7. [Vận hành và chẩn đoán](#7-vận-hành-và-chẩn-đoán)
+8. [tạo đơn hàng và giữ tồn kho](#8-case-study-tạo-đơn-hàng-và-giữ-tồn-kho)
+9. [Khung quyết định và checklist](#9-khung-quyết-định-và-checklist)
 
 ---
 
-## 2. ACID là gì?
+## 1. Invariant và phạm vi transaction
 
-ACID là 4 tính chất nền tảng của transaction.
+### 1.1. Transaction bảo vệ điều gì?
 
-| Tính chất | Ý nghĩa | Câu hỏi cần nhớ |
-|---|---|---|
-| Atomicity | Tất cả thành công hoặc tất cả rollback | Có bị lưu nửa chừng không? |
-| Consistency | Dữ liệu chuyển từ trạng thái hợp lệ này sang trạng thái hợp lệ khác | Có phá rule nghiệp vụ không? |
-| Isolation | Transaction đồng thời không nhìn thấy nhau một cách nguy hiểm | Có đọc/ghi chồng gây sai không? |
-| Durability | Commit xong thì dữ liệu tồn tại bền vững | Mất điện sau commit có mất dữ liệu không? |
+**Invariant** là điều kiện luôn phải đúng trước và sau một thay đổi nghiệp vụ.
 
-Junior thường nhớ ACID như định nghĩa. Middle/Senior cần hiểu ACID là tập trade-off giữa tính đúng, concurrency, performance và vận hành.
+Ví dụ:
 
----
+- Tổng tiền đã thanh toán không vượt quá giá trị hóa đơn.
+- Tồn kho khả dụng không nhỏ hơn `0`.
+- Một email chỉ thuộc về một tài khoản đang hoạt động.
+- Một lịch khám không có hai booking chiếm cùng bác sĩ và khung giờ.
+- Tổng phát sinh Nợ và Có của một bút toán phải cân bằng.
 
-## 3. Atomicity: tất cả hoặc không gì cả
-
-Atomicity nghĩa là transaction không được để dữ liệu ở trạng thái dở dang.
-
-Ví dụ sai nếu không có transaction:
-
-```sql
-UPDATE Accounts
-SET Balance = Balance - 1000000
-WHERE Id = 1;
-
--- App crash ở đây
-
-UPDATE Accounts
-SET Balance = Balance + 1000000
-WHERE Id = 2;
-```
-
-Đúng hơn:
-
-```sql
-BEGIN TRANSACTION;
-
-UPDATE Accounts
-SET Balance = Balance - 1000000
-WHERE Id = 1;
-
-UPDATE Accounts
-SET Balance = Balance + 1000000
-WHERE Id = 2;
-
-COMMIT;
-```
-
-Nếu bất kỳ bước nào lỗi, rollback toàn bộ.
+Một nghiệp vụ tạo đơn hàng có thể gồm:
 
 ```text
-Atomicity không làm nghiệp vụ đúng thay mình.
-Nó chỉ đảm bảo nhóm thao tác đã chọn sẽ cùng thành công hoặc cùng thất bại.
+Insert Order
+Insert OrderItems
+Giảm tồn kho khả dụng
+Ghi lịch sử tồn kho
+Ghi OutboxMessage(OrderCreated)
 ```
 
----
+Nếu các thay đổi này cùng cấu thành một invariant, chúng phải nằm trong cùng transaction local.
 
-## 4. Consistency: dữ liệu phải còn hợp lệ
+### 1.2. Atomicity không thay thế business rule
 
-Consistency nghĩa là sau transaction, dữ liệu vẫn thỏa mãn constraint và rule.
-
-Một số rule được database bảo vệ:
-
-- Primary key
-- Foreign key
-- Unique constraint
-- Check constraint
-- Not null
+Atomicity bảo đảm các thao tác đã chọn cùng commit hoặc cùng rollback. Nó không xác định thao tác nào là hợp lệ.
 
 Ví dụ:
 
 ```sql
-ALTER TABLE OrderItems
-ADD CONSTRAINT FK_OrderItems_Orders
-FOREIGN KEY (OrderId) REFERENCES Orders(Id);
-```
-
-Một số rule nằm ở nghiệp vụ:
-
-- Không cho xuất kho âm
-- Không cho thanh toán hóa đơn đã hủy
-- Không cho sửa phiếu đã khóa sổ
-- Tổng tiền đơn hàng phải bằng tổng dòng hàng
-
-Transaction giúp giữ các thay đổi đi cùng nhau, nhưng developer vẫn phải thiết kế rule đúng.
-
-```text
-Database constraint bảo vệ invariant kỹ thuật.
-Business code bảo vệ invariant nghiệp vụ.
-Transaction nối các thay đổi liên quan thành một đơn vị nhất quán.
-```
-
----
-
-## 5. Isolation: khi nhiều transaction chạy cùng lúc
-
-Isolation là phần dễ gây lỗi production nhất.
-
-Nếu chỉ có một user dùng hệ thống, transaction rất dễ hiểu. Vấn đề xuất hiện khi nhiều request cùng đọc/ghi một dữ liệu.
-
-Ví dụ tồn kho hiện còn 1 sản phẩm:
-
-```text
-User A đọc Stock = 1
-User B đọc Stock = 1
-User A đặt 1 sản phẩm
-User B cũng đặt 1 sản phẩm
-Kết quả: bán 2 sản phẩm trong khi chỉ còn 1
-```
-
-Transaction không tự động giải quyết mọi race condition. Isolation level, lock, câu SQL và thiết kế nghiệp vụ quyết định hệ thống có đúng không.
-
----
-
-## 6. Durability: commit xong phải bền
-
-Durability nghĩa là khi database báo commit thành công, dữ liệu đã được ghi theo cơ chế đủ an toàn để sống sót qua crash thông thường.
-
-Database thường dùng transaction log hoặc write-ahead log:
-
-```text
-Ghi log thay đổi
-Commit
-Sau đó mới flush/merge vào data file theo cơ chế nội bộ
-```
-
-Với developer backend, điều cần nhớ:
-
-- Commit thành công mới được coi là dữ liệu đã lưu
-- Không nên trả success cho client trước khi commit nghiệp vụ quan trọng
-- Không nên tự giả lập transaction bằng nhiều biến trạng thái rời rạc
-- Durability còn phụ thuộc cấu hình database, disk, replication và backup
-
----
-
-## 7. Các lệnh transaction cơ bản
-
-Tên lệnh có thể khác nhẹ giữa SQL Server, PostgreSQL, MySQL, nhưng tư duy giống nhau.
-
-```sql
 BEGIN TRANSACTION;
 
--- Các câu SQL cần đi cùng nhau
+UPDATE Accounts
+SET Balance = Balance - 1000000
+WHERE Id = 1;
+
+UPDATE Accounts
+SET Balance = Balance + 1000000
+WHERE Id = 2;
 
 COMMIT;
 ```
 
-Rollback:
+Transaction trên vẫn có thể làm tài khoản âm nếu thiếu điều kiện nghiệp vụ.
+
+Phiên bản bảo vệ invariant tốt hơn:
 
 ```sql
 BEGIN TRANSACTION;
 
--- Có lỗi hoặc điều kiện nghiệp vụ không đạt
+UPDATE Accounts
+SET Balance = Balance - @amount
+WHERE Id = @sourceAccountId
+  AND Balance >= @amount;
 
-ROLLBACK;
-```
+-- Affected rows phải bằng 1
 
-Savepoint:
+UPDATE Accounts
+SET Balance = Balance + @amount
+WHERE Id = @destinationAccountId;
 
-```sql
-BEGIN TRANSACTION;
-
-INSERT INTO Orders(CustomerId) VALUES (10);
-
-SAVEPOINT BeforeItems;
-
-INSERT INTO OrderItems(OrderId, ProductId, Quantity)
-VALUES (1001, 20, 2);
-
-ROLLBACK TO SAVEPOINT BeforeItems;
+-- Affected rows phải bằng 1
 
 COMMIT;
 ```
 
-Savepoint cho phép rollback một phần bên trong transaction, nhưng không nên lạm dụng để che thiết kế flow rối.
+Điểm quan trọng:
 
----
+> Transaction bảo vệ một tập thay đổi; constraint và điều kiện ghi bảo vệ tính đúng của thay đổi đó.
 
-## 8. Auto-commit và explicit transaction
+### 1.3. Constraint là tuyến phòng thủ cuối
 
-Nhiều database/client mặc định chạy mỗi câu SQL như một transaction riêng.
+Rule có thể được bảo vệ ở nhiều lớp:
 
-```sql
-UPDATE Products SET Price = 100000 WHERE Id = 1;
-```
+| Cơ chế             | Phù hợp với                                   |
+| ------------------ | --------------------------------------------- |
+| `PRIMARY KEY`      | Định danh duy nhất                            |
+| `FOREIGN KEY`      | Quan hệ tham chiếu                            |
+| `UNIQUE`           | Không trùng business key                      |
+| `CHECK`            | Điều kiện có thể biểu diễn trên row           |
+| `NOT NULL`         | Thuộc tính bắt buộc                           |
+| Conditional update | Invariant phụ thuộc trạng thái hiện tại       |
+| Application rule   | Rule cần phối hợp nhiều aggregate hoặc policy |
 
-Câu này có thể tự commit ngay sau khi chạy xong.
-
-Khi nghiệp vụ có nhiều câu cần đi cùng nhau, phải mở explicit transaction:
-
-```sql
-BEGIN TRANSACTION;
-
-UPDATE Products SET StockQuantity = StockQuantity - 2 WHERE Id = 1;
-INSERT INTO StockTransactions(ProductId, Quantity) VALUES (1, -2);
-
-COMMIT;
-```
-
-Sai lầm hay gặp:
+Kiểm tra trùng chỉ bằng application không đủ an toàn:
 
 ```text
-Nghĩ rằng vì code nằm trong cùng một method nên tự động có transaction.
+Request A: SELECT chưa thấy email
+Request B: SELECT chưa thấy email
+Request A: INSERT
+Request B: INSERT
 ```
 
-Method trong application không đồng nghĩa transaction trong database. Phải xem ORM/framework có mở transaction thật không.
+Unique constraint biến race condition này thành một kết quả xác định:
 
----
+```sql
+CREATE UNIQUE INDEX UX_Users_Email
+ON Users(Email);
+```
 
-## 9. Transaction boundary: mở ở đâu, đóng ở đâu?
+Application vẫn nên kiểm tra trước để trả lỗi thân thiện, nhưng database constraint mới là nơi quyết định cuối cùng khi có concurrency.
 
-Transaction boundary là phạm vi bắt đầu và kết thúc transaction.
+### 1.4. Boundary quá rộng và quá hẹp
 
-Một boundary tốt:
+Boundary quá hẹp:
 
-- Bao đủ các thao tác dữ liệu cần nhất quán
-- Không bao quá rộng
-- Không giữ lock trong lúc chờ network/API ngoài
-- Có commit/rollback rõ ràng
-- Có log và error handling đủ để debug
+```text
+Insert Order      → commit
+Insert OrderItems → commit
+Update Stock      → lỗi
+```
 
-Ví dụ không tốt:
+Order tồn tại nhưng nghiệp vụ chưa hoàn chỉnh.
+
+Boundary quá rộng:
 
 ```text
 Begin transaction
 Ghi database
-Gọi API thanh toán bên ngoài
-Gửi email
+Gọi payment API
 Upload file
-Commit transaction
+Gửi email
+Commit
 ```
 
-Vấn đề:
+Transaction giữ connection, lock hoặc row version trong lúc chờ network. Side effect đã xảy ra cũng không thể được database rollback.
 
-- Transaction giữ lock quá lâu
-- API ngoài chậm làm nghẽn database
-- Nếu email gửi rồi rollback thì side effect ngoài database không rollback được
-- Nếu commit rồi gửi email lỗi thì trạng thái nghiệp vụ lại lệch
+Boundary phù hợp thường có đặc điểm:
 
-Tư duy senior:
-
-```text
-Transaction database chỉ rollback được database.
-Những side effect bên ngoài cần pattern riêng như outbox, idempotency, saga hoặc retry có kiểm soát.
-```
+- Bao đủ các thay đổi local cần nhất quán mạnh.
+- Không chờ người dùng hoặc dịch vụ ngoài.
+- Chuẩn bị dữ liệu trước khi mở transaction.
+- Mở muộn, ghi nhanh và commit sớm.
+- Đẩy công việc sau commit sang outbox hoặc background worker khi cần.
 
 ---
 
-## 10. Isolation anomalies: các lỗi đọc/ghi đồng thời
+## 2. ACID và lifecycle thực thi
 
-### 10.1. Dirty Read
+### 2.1. ACID là contract, không phải khẩu hiệu
 
-Transaction A đọc dữ liệu chưa commit của transaction B.
+| Tính chất   | Contract                                           | Câu hỏi kiểm tra                                       |
+| ----------- | -------------------------------------------------- | ------------------------------------------------------ |
+| Atomicity   | Không công bố trạng thái nửa chừng                 | Một câu lệnh lỗi thì phần đã ghi được xử lý thế nào?   |
+| Consistency | Invariant còn đúng sau commit                      | Constraint và điều kiện nghiệp vụ nằm ở đâu?           |
+| Isolation   | Kết quả có thể được giải thích khi chạy đồng thời  | Transaction khác được phép nhìn thấy hoặc thay đổi gì? |
+| Durability  | Commit thành công sống sót qua failure theo policy | Log đã được flush và replica đã xác nhận tới đâu?      |
+
+ACID có chi phí. Isolation mạnh hơn có thể giảm concurrency; durability đồng bộ hơn có thể tăng commit latency. Cấu hình engine và yêu cầu nghiệp vụ quyết định điểm cân bằng.
+
+### 2.2. Auto-commit và explicit transaction
+
+Trong auto-commit, mỗi câu lệnh là một transaction độc lập:
+
+```sql
+UPDATE Products
+SET Price = 100000
+WHERE Id = 1;
+```
+
+Một method application không tự động trở thành transaction chỉ vì các câu lệnh nằm cạnh nhau:
+
+```text
+Method CreateOrder()
+├── Insert Order      → auto-commit
+├── Insert OrderItems → auto-commit
+└── Update Stock      → auto-commit
+```
+
+Khi nhiều thao tác phải cùng thành công, application hoặc ORM phải mở explicit transaction trên cùng connection:
+
+```sql
+BEGIN TRANSACTION;
+
+INSERT INTO Orders(Id, CustomerId, Status)
+VALUES (@orderId, @customerId, 'Created');
+
+INSERT INTO OrderItems(OrderId, ProductId, Quantity)
+VALUES (@orderId, @productId, @quantity);
+
+COMMIT;
+```
+
+### 2.3. Commit, rollback và savepoint
+
+Lifecycle tổng quát:
+
+```text
+BEGIN
+  ↓
+Thực thi câu lệnh
+  ├── Thành công → tiếp tục
+  └── Lỗi        → ROLLBACK
+  ↓
+Kiểm tra invariant
+  ├── Đạt        → COMMIT
+  └── Không đạt  → ROLLBACK
+```
+
+Savepoint đánh dấu một vị trí có thể rollback cục bộ:
+
+```sql
+BEGIN TRANSACTION;
+
+INSERT INTO Orders(Id, CustomerId)
+VALUES (@orderId, @customerId);
+
+SAVEPOINT BeforeOptionalItems;
+
+-- Các thao tác có thể hoàn tác tới savepoint
+
+ROLLBACK TO SAVEPOINT BeforeOptionalItems;
+
+COMMIT;
+```
+
+Savepoint không biến phần bên trong thành một transaction durable độc lập. Outer transaction rollback vẫn có thể hoàn tác toàn bộ thay đổi.
+
+### 2.4. Durability, WAL và thời điểm commit
+
+Database thường sửa page trong Buffer Pool trước. Page đã thay đổi nhưng chưa xuống data file được gọi là **Dirty Page**.
+
+Write-Ahead Logging đặt ra thứ tự:
+
+```text
+Thay đổi page trong RAM
+        ↓
+Tạo WAL / transaction log record
+        ↓
+Flush log cần thiết xuống durable storage
+        ↓
+Xác nhận COMMIT
+        ↓
+Flush dirty page xuống data file ở thời điểm phù hợp
+```
+
+Vì vậy:
+
+```text
+COMMIT thành công
+├── Log đã đủ để recovery theo durability policy
+└── Dirty page có thể vẫn nằm trong Buffer Pool
+```
+
+Checkpoint hoặc background writer ghi dirty page xuống data file sau đó. Cơ chế này tách commit latency khỏi random write của data page.
+
+Chi tiết về Buffer Pool, WAL và checkpoint nằm trong [Cơ chế lưu trữ, Buffer Pool và I/O](/database/storage-io/theory).
+
+### 2.5. Failure boundary quanh commit
+
+Application phải phân biệt ba thời điểm:
+
+| Failure                         | Trạng thái có thể xảy ra                    | Cách xử lý                                      |
+| ------------------------------- | ------------------------------------------- | ----------------------------------------------- |
+| Trước khi database nhận commit  | Transaction chưa commit                     | Rollback hoặc connection đóng                   |
+| Trong lúc commit                | Client không biết commit đã thành công chưa | Kiểm tra bằng idempotency key hoặc business key |
+| Sau commit nhưng trước response | Dữ liệu đã commit, client thấy timeout      | Retry phải idempotent                           |
+
+Trường hợp thứ hai và thứ ba tạo ra **ambiguous outcome**: application không được giả định timeout đồng nghĩa rollback.
+
+---
+
+## 3. Isolation trong môi trường đồng thời
+
+### 3.1. Transaction không tự động loại bỏ race condition
+
+Giả sử tồn kho bằng `1`:
+
+```text
+Request A đọc Stock = 1
+Request B đọc Stock = 1
+A quyết định bán 1
+B quyết định bán 1
+A ghi Stock = 0
+B ghi Stock = 0
+```
+
+Mỗi request có thể chạy trong một transaction riêng nhưng invariant vẫn bị phá. Nguyên nhân là quyết định nghiệp vụ dựa trên dữ liệu đã cũ.
+
+Isolation level, câu SQL, lock, version column và constraint phải được thiết kế cùng nhau.
+
+### 3.2. Các anomaly quan trọng
+
+#### Dirty Read
+
+Transaction đọc thay đổi chưa commit của transaction khác:
 
 ```text
 B cập nhật Balance = 0 nhưng chưa commit
-A đọc thấy Balance = 0
+A đọc Balance = 0
 B rollback
-A đã đọc một giá trị chưa từng thật sự tồn tại
 ```
 
-Dirty read rất nguy hiểm cho nghiệp vụ tiền, kho, công nợ.
+A đã sử dụng một giá trị chưa từng trở thành trạng thái chính thức.
 
-### 10.2. Non-repeatable Read
+#### Non-repeatable Read
 
-Trong cùng một transaction, đọc cùng một dòng hai lần nhưng ra hai giá trị khác nhau vì transaction khác đã commit ở giữa.
+Cùng một row được đọc hai lần trong một transaction nhưng trả về hai giá trị:
 
 ```text
 A đọc Order.Status = Pending
-B đổi Order.Status = Paid và commit
+B cập nhật thành Paid và commit
 A đọc lại Order.Status = Paid
 ```
 
-### 10.3. Phantom Read
+#### Phantom Read
 
-Trong cùng một transaction, query theo điều kiện trả về thêm hoặc mất dòng vì transaction khác insert/delete ở giữa.
+Cùng một predicate trả về tập row khác nhau:
 
 ```text
-A đếm đơn hàng Pending = 10
-B thêm một đơn Pending và commit
-A đếm lại Pending = 11
+A đếm 10 order Pending
+B insert một order Pending và commit
+A đếm lại được 11
 ```
 
-### 10.4. Lost Update
+#### Lost Update
 
-Hai transaction cùng đọc một giá trị, cùng tính toán, rồi ghi đè kết quả của nhau.
+Hai transaction đọc cùng phiên bản rồi ghi đè kết quả:
 
 ```text
 Stock = 10
 A đọc 10, trừ 2, ghi 8
 B đọc 10, trừ 3, ghi 7
-Kết quả đúng phải là 5, nhưng database còn 7
+Kết quả đúng phải là 5
 ```
 
-Lost update là lỗi rất hay gặp khi code làm kiểu:
+#### Write Skew
+
+Hai transaction cập nhật hai row khác nhau nhưng cùng phá một invariant tổng thể:
 
 ```text
-Read -> Modify in memory -> Write back
+Invariant: luôn có ít nhất một bác sĩ trực
+
+A thấy B đang trực → cho A nghỉ
+B thấy A đang trực → cho B nghỉ
+
+Hai row khác nhau cùng commit
+→ không còn bác sĩ trực
 ```
 
----
+Snapshot nhất quán không mặc nhiên chặn write skew. Invariant đa row có thể cần Serializable, explicit lock hoặc mô hình dữ liệu khác.
 
-## 11. Isolation levels
+### 3.3. Isolation levels
 
-Isolation level quyết định transaction được cách ly mạnh đến đâu.
+| Isolation level  | Guarantee chính                                    | Anomaly còn có thể gặp                                | Chi phí điển hình |
+| ---------------- | -------------------------------------------------- | ----------------------------------------------------- | ----------------- |
+| Read Uncommitted | Ít hoặc không cách ly đọc                          | Dirty read và các anomaly khác                        | Thấp              |
+| Read Committed   | Không đọc dữ liệu chưa commit                      | Non-repeatable read, phantom, lost update tùy pattern | Thấp đến vừa      |
+| Repeatable Read  | Row đã đọc ổn định hơn trong transaction           | Phantom hoặc write skew tùy engine                    | Vừa               |
+| Serializable     | Kết quả tương đương một thứ tự chạy tuần tự hợp lệ | Transaction có thể bị block hoặc abort để retry       | Cao nhất          |
 
-| Isolation level | Chặn dirty read | Chặn non-repeatable read | Chặn phantom | Chi phí |
-|---|---:|---:|---:|---|
-| Read Uncommitted | Không | Không | Không | Thấp |
-| Read Committed | Có | Không | Không | Thấp/vừa |
-| Repeatable Read | Có | Có | Tùy DB | Vừa/cao |
-| Serializable | Có | Có | Có | Cao |
+Tên isolation level không đủ để suy ra toàn bộ hành vi. SQL Server, PostgreSQL và MySQL/InnoDB có khác biệt về MVCC, lock, snapshot và phantom protection.
 
-Lưu ý quan trọng:
+Khi điều tra concurrency bug, cần xác nhận:
+
+- Engine và version đang chạy.
+- Isolation level của session/transaction.
+- Database option liên quan snapshot hoặc MVCC.
+- Câu SQL và execution plan thực tế.
+- Lock hoặc version conflict quan sát được.
+
+### 3.4. Lock-based concurrency và MVCC
+
+Lock-based read có thể khiến reader chờ writer hoặc writer chờ reader, tùy lock compatibility và isolation.
+
+MVCC giữ nhiều phiên bản dữ liệu:
 
 ```text
-Cùng tên isolation level nhưng hành vi thực tế có thể khác giữa SQL Server, PostgreSQL, MySQL/InnoDB.
+Writer tạo version mới
+Reader tiếp tục đọc snapshot phù hợp
 ```
 
-Ví dụ `Repeatable Read` trong PostgreSQL dùng snapshot isolation và khác với MySQL/InnoDB ở nhiều chi tiết lock/MVCC. Khi xử lý bug concurrency, phải đọc đúng tài liệu của database đang dùng.
+MVCC giảm read/write blocking nhưng không loại bỏ:
+
+- Writer chặn writer.
+- Unique-key conflict.
+- Serialization failure.
+- Version store hoặc undo/WAL tăng do transaction dài.
+- Cleanup/vacuum bị trì hoãn.
+
+Chi tiết về lock compatibility, escalation, deadlock graph và lock ordering nằm trong [Locking và Deadlock](/database/locking-deadlock/theory).
+
+### 3.5. Chọn isolation theo invariant
+
+Không nên chọn isolation chỉ theo tên “mạnh” hoặc “nhẹ”.
+
+Quy trình:
+
+1. Xác định dữ liệu được đọc để ra quyết định.
+2. Xác định transaction khác có thể thay đổi dữ liệu đó như thế nào.
+3. Xác định anomaly nào làm sai nghiệp vụ.
+4. Chọn atomic statement, constraint hoặc concurrency pattern trước.
+5. Nâng isolation khi các cơ chế cục bộ chưa bảo vệ đủ invariant.
+6. Chuẩn bị retry nếu engine có thể abort transaction do conflict.
+
+Serializable phù hợp khi cần bảo vệ predicate hoặc invariant đa row và contention có thể chấp nhận được. Nó không nên được bật toàn hệ thống như một biện pháp thay thế thiết kế.
 
 ---
 
-## 12. Read Committed: mặc định phổ biến
+## 4. Các mẫu cập nhật an toàn
 
-Read Committed thường là default trong nhiều hệ thống.
+### 4.1. Atomic conditional update
 
-Ý nghĩa:
+Pattern dễ sai:
 
 ```text
-Không đọc dữ liệu chưa commit.
-Mỗi câu lệnh chỉ đọc dữ liệu đã commit tại thời điểm câu lệnh đó chạy.
+SELECT Stock
+→ kiểm tra trong application
+→ tính giá trị mới
+→ UPDATE
 ```
 
-Nó chặn dirty read, nhưng vẫn có thể gặp non-repeatable read và phantom read.
+Khoảng thời gian giữa `SELECT` và `UPDATE` cho phép request khác thay đổi dữ liệu.
 
-Phù hợp cho nhiều màn hình CRUD thông thường:
-
-- Danh sách
-- Chi tiết
-- Tìm kiếm
-- Báo cáo nhẹ không yêu cầu snapshot tuyệt đối
-
-Nhưng với nghiệp vụ cạnh tranh dữ liệu như tồn kho, số dư, quota, booking slot, không nên chỉ dựa vào Read Committed và hy vọng mọi thứ đúng.
-
----
-
-## 13. Serializable: mạnh nhưng đắt
-
-Serializable cố làm kết quả giống như các transaction chạy tuần tự từng cái một.
-
-Ưu điểm:
-
-- Dễ reasoning hơn
-- Chặn nhiều anomaly
-- Phù hợp một số nghiệp vụ cần tính đúng cực mạnh
-
-Nhược điểm:
-
-- Giảm concurrency
-- Dễ lock/block nhiều hơn
-- Có thể tăng deadlock hoặc serialization failure
-- Cần retry ở application
-
-Không nên bật Serializable toàn hệ thống chỉ vì muốn "an toàn". Dùng nó cho đúng đoạn nghiệp vụ cần thiết, đo hiệu năng và chuẩn bị retry.
-
----
-
-## 14. Lock: database bảo vệ dữ liệu bằng cách nào?
-
-Lock là cơ chế database dùng để điều phối đọc/ghi đồng thời.
-
-Các lock thường gặp theo ý tưởng:
-
-| Lock | Ý nghĩa |
-|---|---|
-| Shared lock | Dùng khi đọc, nhiều transaction có thể cùng đọc |
-| Exclusive lock | Dùng khi ghi, chặn transaction khác ghi/đọc tùy isolation |
-| Update lock | Dùng để giảm deadlock trong một số DB như SQL Server |
-| Row/Page/Table lock | Phạm vi lock ở dòng, page hoặc cả bảng |
-| Range lock | Lock một khoảng dữ liệu để chặn phantom |
-
-Developer không cần thuộc mọi loại lock ngay từ đầu, nhưng phải hiểu:
-
-```text
-Transaction càng dài, lock càng giữ lâu.
-Lock giữ lâu làm request khác chờ lâu.
-Chờ lâu có thể thành timeout, deadlock hoặc nghẽn toàn hệ thống.
-```
-
----
-
-## 15. MVCC: đọc không nhất thiết phải chặn ghi
-
-Nhiều database hiện đại dùng MVCC, tức multi-version concurrency control.
-
-Ý tưởng:
-
-```text
-Khi dữ liệu thay đổi, database có thể giữ nhiều phiên bản của dòng.
-Reader đọc snapshot phù hợp.
-Writer ghi phiên bản mới.
-```
-
-Ưu điểm:
-
-- Reader ít bị writer chặn
-- Truy vấn đọc ổn định hơn
-- Concurrency tốt hơn trong nhiều workload
-
-Nhưng MVCC không phải phép màu:
-
-- Writer vẫn có thể chặn writer
-- Transaction dài làm version cũ bị giữ lâu
-- Database cần vacuum/cleanup/version store
-- Vẫn có serialization conflict tùy isolation
-
-Senior cần biết database của mình dùng lock-based read hay MVCC/snapshot ở mode nào, vì nó ảnh hưởng trực tiếp đến bug và performance.
-
----
-
-## 16. Pessimistic locking
-
-Pessimistic locking nghĩa là khóa dữ liệu trước khi xử lý, giả định có khả năng tranh chấp cao.
-
-Ví dụ SQL Server:
+Đưa điều kiện vào write path:
 
 ```sql
-BEGIN TRANSACTION;
-
-SELECT StockQuantity
-FROM Products WITH (UPDLOCK, ROWLOCK)
-WHERE Id = @productId;
-
 UPDATE Products
 SET StockQuantity = StockQuantity - @quantity
 WHERE Id = @productId
   AND StockQuantity >= @quantity;
-
-COMMIT;
 ```
 
-Ví dụ PostgreSQL:
+Diễn giải `affected rows`:
+
+```text
+1 row → invariant được thỏa và update thành công
+0 row → không tồn tại, không đủ tồn hoặc trạng thái đã đổi
+```
+
+Nếu cần phân biệt các nguyên nhân của `0 row`, application có thể đọc lại sau thất bại. Việc đọc lại dùng để tạo response, không dùng để quyết định update ban đầu.
+
+### 4.2. State transition có điều kiện
+
+Chuyển trạng thái nên kiểm tra trạng thái nguồn trong câu `UPDATE`:
+
+```sql
+UPDATE Orders
+SET Status = 'Paid',
+    PaidAt = CURRENT_TIMESTAMP
+WHERE Id = @orderId
+  AND Status = 'Pending';
+```
+
+Pattern này bảo đảm chỉ một request thắng transition `Pending → Paid`.
+
+Nếu `affected rows = 0`, cần xác định:
+
+- Order không tồn tại.
+- Order đã được xử lý.
+- Transition không hợp lệ.
+
+### 4.3. Optimistic concurrency
+
+Optimistic concurrency phát hiện dữ liệu đã thay đổi kể từ lúc được đọc.
+
+```sql
+UPDATE Products
+SET Name = @name,
+    Price = @price,
+    Version = Version + 1
+WHERE Id = @id
+  AND Version = @expectedVersion;
+```
+
+`0 row affected` là conflict, không phải update thành công.
+
+Phù hợp khi:
+
+- Xung đột tương đối hiếm.
+- User giữ form lâu trước khi lưu.
+- Có thể hiển thị conflict, reload hoặc merge.
+- Không muốn giữ database lock trong thời gian user thao tác.
+
+Version phải được tăng atomically trong database. Chỉ so sánh `UpdatedAt` có thể không đủ nếu độ phân giải timestamp thấp hoặc clock không đáng tin cậy.
+
+### 4.4. Pessimistic locking
+
+Pessimistic locking khóa dữ liệu trước khi ra quyết định.
+
+PostgreSQL:
 
 ```sql
 BEGIN;
 
 SELECT StockQuantity
 FROM Products
-WHERE Id = $1
+WHERE Id = @productId
 FOR UPDATE;
 
 UPDATE Products
-SET StockQuantity = StockQuantity - $2
-WHERE Id = $1
-  AND StockQuantity >= $2;
+SET StockQuantity = StockQuantity - @quantity
+WHERE Id = @productId;
 
 COMMIT;
 ```
 
 Phù hợp khi:
 
-- Cạnh tranh cao
-- Không muốn retry quá nhiều
-- Dữ liệu rất nhạy như tồn kho, số dư, slot đặt lịch
+- Contention cao.
+- Nghiệp vụ cần giữ quyền cập nhật trong một transaction ngắn.
+- Chi phí conflict/retry cao hơn chi phí chờ lock.
 
-Nhược điểm:
+Transaction phải ngắn và các code path phải lock resource theo thứ tự nhất quán.
 
-- Giữ lock
-- Dễ block request khác
-- Cần transaction ngắn
+### 4.5. Unique constraint và idempotency key
 
----
-
-## 17. Optimistic concurrency
-
-Optimistic concurrency giả định xung đột hiếm. Không khóa trước, nhưng khi update thì kiểm tra dữ liệu có bị người khác đổi chưa.
-
-Thường dùng version column:
+Unique constraint giải quyết cạnh tranh trên một business key:
 
 ```sql
-UPDATE Products
-SET Name = @name,
-    Price = @price,
-    RowVersion = RowVersion + 1
-WHERE Id = @id
-  AND RowVersion = @expectedVersion;
+CREATE UNIQUE INDEX UX_Payments_IdempotencyKey
+ON Payments(IdempotencyKey);
 ```
 
-Nếu số dòng affected = 0:
+Idempotency record nên lưu:
 
-```text
-Dữ liệu đã bị thay đổi bởi transaction khác.
-Không được ghi đè im lặng.
-App cần báo conflict hoặc reload dữ liệu.
-```
+- Key do client hoặc upstream cung cấp.
+- Hash hoặc thuộc tính định danh request.
+- Trạng thái xử lý.
+- Business entity đã tạo.
+- Response có thể trả lại.
+- Thời gian hết hạn nếu policy cho phép.
 
-Phù hợp khi:
+Hai request dùng cùng key nhưng payload khác nhau phải bị từ chối. Nếu không, key có thể vô tình ánh xạ hai ý định nghiệp vụ khác nhau.
 
-- Xung đột thấp
-- Màn hình chỉnh sửa dữ liệu master
-- Không muốn giữ lock lâu trong lúc user đang nhập form
-- Có thể yêu cầu user refresh hoặc merge
-
-Không phù hợp nếu nghiệp vụ cần giữ chỗ ngay lập tức với contention cao mà retry liên tục sẽ gây trải nghiệm kém.
+Catalog lựa chọn giữa atomic update, optimistic version, pessimistic lock, queue theo key, atomic claim và outbox/inbox nằm trong [Concurrency Control Patterns](/database/concurrency-control-patterns/theory).
 
 ---
 
-## 18. Cập nhật tồn kho đúng hơn
+## 5. Transaction boundary trong application
 
-Sai lầm phổ biến:
+### 5.1. Boundary thuộc về use case
 
-```text
-Read stock
-Check in application
-Subtract in application
-Save stock mới
-```
-
-Dễ lost update.
-
-Tốt hơn là đưa điều kiện vào câu update atomic:
-
-```sql
-UPDATE Products
-SET StockQuantity = StockQuantity - @quantity
-WHERE Id = @productId
-  AND StockQuantity >= @quantity;
-```
-
-Sau đó kiểm tra số dòng affected:
+Transaction boundary thường nằm ở application service hoặc use-case handler vì lớp này biết những thay đổi nào thuộc cùng một nghiệp vụ.
 
 ```text
-Affected rows = 1 -> trừ kho thành công
-Affected rows = 0 -> không đủ tồn hoặc product không tồn tại
+CreateOrderUseCase
+├── Begin transaction
+├── OrderRepository.Insert
+├── InventoryRepository.Reserve
+├── OutboxRepository.Add
+└── Commit
 ```
 
-Nếu cần ghi thêm lịch sử kho:
+Repository không nên tự commit nếu caller cần phối hợp nhiều repository trong cùng transaction.
 
-```sql
-BEGIN TRANSACTION;
+### 5.2. Cùng transaction yêu cầu cùng database context
 
-UPDATE Products
-SET StockQuantity = StockQuantity - @quantity
-WHERE Id = @productId
-  AND StockQuantity >= @quantity;
+Cần kiểm tra khi dùng ORM:
 
--- Nếu affected rows = 0 thì rollback
+- Các repository có dùng cùng connection/session/context không?
+- `SaveChanges` có mở transaction riêng không?
+- Nhiều lần `SaveChanges` có nằm trong cùng explicit transaction không?
+- Execution strategy có tự retry toàn bộ delegate không?
+- Exception có làm transaction trở thành trạng thái không thể commit không?
+- Connection có bị dispose trước commit không?
 
-INSERT INTO StockTransactions(ProductId, Quantity, Reason)
-VALUES (@productId, -@quantity, 'OrderCreated');
+Hai `DbContext` hoặc hai connection không tự động chia sẻ một local transaction.
 
-COMMIT;
-```
+### 5.3. Nested transaction và savepoint
 
-Điểm mấu chốt:
-
-```text
-Điều kiện chống âm kho phải nằm trong write path, không chỉ nằm trong code kiểm tra trước đó.
-```
-
----
-
-## 19. Deadlock là gì?
-
-Deadlock xảy ra khi hai hoặc nhiều transaction chờ nhau theo vòng tròn.
-
-Ví dụ:
-
-```text
-Transaction A khóa Order 1
-Transaction B khóa Order 2
-A muốn khóa Order 2 nên phải chờ B
-B muốn khóa Order 1 nên phải chờ A
-Không ai đi tiếp được
-```
-
-Database thường chọn một transaction làm nạn nhân và rollback nó.
-
-Dấu hiệu:
-
-- Lỗi deadlock trong log
-- Request thỉnh thoảng fail dù dữ liệu không sai
-- Tải cao hoặc nhiều nghiệp vụ đồng thời thì lỗi tăng
-
-Deadlock không nhất thiết là bug database. Thường là hệ quả của thứ tự lock không nhất quán hoặc transaction quá rộng.
-
----
-
-## 20. Giảm deadlock
-
-Các cách giảm deadlock:
-
-1. Luôn truy cập bảng/dòng theo cùng một thứ tự.
-2. Giữ transaction ngắn.
-3. Không gọi API ngoài khi đang mở transaction.
-4. Có index phù hợp để update/delete không scan quá rộng.
-5. Update theo key cụ thể, tránh điều kiện mơ hồ.
-6. Chia batch lớn thành batch nhỏ hơn.
-7. Dùng lock hint có chủ đích khi database hỗ trợ và đã hiểu tác dụng.
-8. Bắt lỗi deadlock và retry có backoff cho nghiệp vụ idempotent.
-
-Ví dụ xử lý nhiều dòng:
-
-```text
-Không ổn:
-Request A update product theo thứ tự [2, 1]
-Request B update product theo thứ tự [1, 2]
-
-Ổn hơn:
-Luôn sort ProductId tăng dần trước khi update: [1, 2]
-```
-
-Thứ tự lock nhất quán là một kỹ thuật đơn giản nhưng rất hiệu quả.
-
----
-
-## 21. Timeout, blocking và long-running transaction
-
-Không phải lỗi transaction nào cũng là deadlock.
-
-Blocking:
-
-```text
-Transaction A giữ lock.
-Transaction B chờ A nhả lock.
-```
-
-Timeout:
-
-```text
-B chờ quá lâu nên application/database hủy request.
-```
-
-Nguyên nhân hay gặp:
-
-- Transaction mở quá lâu
-- Query thiếu index nên update quét nhiều dòng
-- Màn hình export/report chạy chung database ghi
-- Batch job cập nhật lượng lớn trong giờ cao điểm
-- Code mở transaction rồi xử lý logic hoặc gọi service ngoài quá lâu
-
-Checklist khi nghi ngờ blocking:
-
-- Transaction nào đang mở lâu?
-- Query nào giữ lock?
-- Có index cho điều kiện `WHERE` của `UPDATE/DELETE` không?
-- Có batch job nào chạy cùng giờ không?
-- Isolation level có quá mạnh không?
-
----
-
-## 22. Transaction và index
-
-Index ảnh hưởng trực tiếp đến transaction.
-
-Ví dụ:
-
-```sql
-UPDATE Orders
-SET Status = 'Expired'
-WHERE CreatedAt < @expiredBefore
-  AND Status = 'Pending';
-```
-
-Nếu thiếu index phù hợp, database có thể scan nhiều dòng, giữ lock rộng và lâu hơn.
-
-Index gợi ý:
-
-```sql
-CREATE INDEX IX_Orders_Status_Created
-ON Orders(Status, CreatedAt);
-```
-
-Nhưng index cũng làm ghi chậm hơn vì mỗi insert/update/delete phải cập nhật thêm index.
-
-Tư duy middle/senior:
-
-```text
-Index không chỉ để SELECT nhanh.
-Index đúng còn giúp transaction ghi tìm đúng dòng nhanh hơn, giảm lock duration và giảm blocking.
-```
-
----
-
-## 23. Transaction trong ORM
-
-ORM như Entity Framework, Hibernate, Sequelize, TypeORM thường có cơ chế transaction riêng.
-
-Ví dụ khái niệm:
-
-```text
-Begin transaction
-Repository A save
-Repository B save
-Commit
-```
-
-Cần kiểm tra rõ:
-
-- `SaveChanges` có tự mở transaction không?
-- Nhiều lần `SaveChanges` có nằm cùng một transaction không?
-- Có dùng nhiều DbContext/connection khác nhau không?
-- Exception có rollback thật không?
-- Transaction có bị commit trước khi publish event/gọi API ngoài không?
-
-Sai lầm hay gặp:
-
-```text
-Service A tự mở transaction.
-Service B cũng tự mở transaction.
-Hai service được gọi trong cùng một use case nhưng không cùng boundary.
-```
-
-Kết quả có thể là một phần commit, một phần rollback, hoặc transaction lồng nhau không hoạt động như tưởng tượng.
-
----
-
-## 24. Nested transaction có thật không?
-
-Nhiều developer nghĩ có thể mở transaction lồng nhau tùy ý.
+Mô hình:
 
 ```text
 Outer transaction begin
@@ -789,85 +609,150 @@ Outer transaction begin
 Outer rollback
 ```
 
-Trong nhiều database/framework, inner transaction không phải transaction độc lập thật. Nó có thể chỉ là savepoint, counter, hoặc phụ thuộc transaction ngoài.
+Trong nhiều engine/framework, inner transaction chỉ là:
 
-Câu hỏi cần kiểm tra:
+- Savepoint.
+- Transaction counter.
+- Scope tham gia ambient transaction.
+- Một transaction độc lập trên connection khác.
 
-- Database có hỗ trợ nested transaction thật không?
-- ORM map nested transaction thành gì?
-- Inner commit có thật sự durable chưa?
-- Outer rollback có rollback cả inner không?
+Không được suy luận từ tên API. Cần xác nhận:
 
-Quy tắc thực dụng:
+- Inner commit có durable độc lập không?
+- Outer rollback có hoàn tác phần inner không?
+- Framework có tạo savepoint không?
+- Error ở inner scope có làm outer transaction unusable không?
+
+Một use case có một owner rõ ràng cho commit/rollback giúp tránh ambiguity.
+
+### 5.4. Async và external call
+
+`await` không tự gây lỗi transaction. Vấn đề là await điều gì trong lúc transaction đang mở.
+
+Không nên giữ transaction khi:
+
+- Gọi HTTP API.
+- Chờ message broker.
+- Upload/download file.
+- Gửi email.
+- Chờ user input.
+- Chạy CPU work dài.
+
+Flow phù hợp hơn:
 
 ```text
-Mỗi use case nên có một transaction boundary rõ ở application service/use case layer.
-Repository không nên tự ý commit nghiệp vụ lớn nếu caller cần kiểm soát transaction.
-```
-
----
-
-## 25. Side effect ngoài database
-
-Transaction database không rollback được:
-
-- Gửi email
-- Gọi cổng thanh toán
-- Gửi message queue nếu gửi trực tiếp
-- Upload file
-- Gọi API hệ thống khác
-- Push notification
-
-Ví dụ nguy hiểm:
-
-```text
+Validate dữ liệu không cần lock
+Chuẩn bị command
 Begin transaction
-Tạo order
-Gửi email xác nhận
-Update tồn kho lỗi
-Rollback transaction
-```
-
-Email đã gửi nhưng order không tồn tại.
-
-Đổi thứ tự cũng có vấn đề:
-
-```text
-Begin transaction
-Tạo order
+Thực hiện các write cần thiết
+Ghi outbox
 Commit
-Gửi email lỗi
+Xử lý side effect sau commit
 ```
 
-Order tồn tại nhưng email không gửi.
+### 5.5. Index ảnh hưởng write transaction
 
-Giải pháp thường dùng:
+Một câu `UPDATE` thiếu access path phù hợp có thể scan nhiều row:
 
-- Outbox pattern
-- Idempotent consumer
-- Retry có kiểm soát
-- Saga/process manager cho luồng dài
-- Reconciliation job để so khớp dữ liệu
+```sql
+UPDATE Orders
+SET Status = 'Expired'
+WHERE Status = 'Pending'
+  AND CreatedAt < @expiredBefore;
+```
+
+Hệ quả:
+
+- Nhiều logical reads.
+- Lock nhiều row/page hơn.
+- Transaction kéo dài.
+- Blocking và deadlock risk tăng.
+- WAL/transaction log tăng nếu update nhiều row.
+
+Index phù hợp giúp tìm target row nhanh hơn, nhưng mỗi index bổ sung cũng làm write amplification tăng. Quyết định index phải cân bằng read path, write cost và lock footprint.
+
+### 5.6. Batch transaction
+
+Một transaction cập nhật hàng triệu row có thể gây:
+
+- Log tăng nhanh.
+- Lock escalation.
+- Version store/undo tăng.
+- Replication lag.
+- Rollback kéo dài.
+- Checkpoint và I/O burst.
+
+Chia batch giới hạn blast radius:
+
+```text
+Đọc batch key ổn định
+Begin transaction
+Update 1.000 rows
+Commit
+Ghi progress
+Lặp batch tiếp theo
+```
+
+Batching thay đổi atomicity: toàn bộ job không còn là một transaction. Job phải có checkpoint logic, idempotency và trạng thái resume rõ ràng.
+
+### 5.7. Retry đúng boundary
+
+Các lỗi có thể retry:
+
+- Deadlock victim.
+- Serialization failure.
+- Transient connection failure khi outcome xác định.
+- Lock timeout nếu policy nghiệp vụ cho phép.
+
+Retry phải chạy lại toàn bộ transaction từ đầu vì dữ liệu đã đọc ở attempt cũ có thể không còn đúng.
+
+```text
+Attempt
+├── Begin transaction
+├── Đọc trạng thái cần thiết
+├── Kiểm tra invariant
+├── Ghi dữ liệu
+└── Commit
+```
+
+Không retry mù mọi exception. Retry cần:
+
+- Phân loại lỗi transient.
+- Giới hạn attempt.
+- Exponential backoff và jitter.
+- Idempotency.
+- Metric và log cho từng attempt.
+- Cơ chế xử lý ambiguous commit.
 
 ---
 
-## 26. Outbox pattern
+## 6. Side effect và tính nhất quán ngoài database
 
-Outbox giúp đảm bảo thay đổi database và việc phát event đi cùng nhau ở mức đáng tin cậy.
+### 6.1. Local transaction có giới hạn
 
-Ý tưởng:
+Database transaction không rollback được:
+
+- Email đã gửi.
+- HTTP request đã được hệ thống khác xử lý.
+- Message đã publish ra broker.
+- File đã upload.
+- Cache đã cập nhật.
+
+Hai thứ tự đều có failure window:
 
 ```text
-Trong cùng transaction:
-1. Ghi dữ liệu nghiệp vụ
-2. Ghi một dòng OutboxMessage
-
-Sau commit:
-Worker đọc OutboxMessage và publish ra message broker/email/service ngoài.
-Publish thành công thì đánh dấu processed.
+Publish trước commit
+→ transaction rollback nhưng consumer đã nhận event
 ```
 
-Ví dụ:
+```text
+Commit trước publish
+→ dữ liệu tồn tại nhưng process dừng trước khi publish
+```
+
+### 6.2. Transactional Outbox
+
+Outbox ghi business data và intent phát message trong cùng local transaction:
 
 ```sql
 BEGIN TRANSACTION;
@@ -875,527 +760,408 @@ BEGIN TRANSACTION;
 INSERT INTO Orders(Id, CustomerId, Status)
 VALUES (@orderId, @customerId, 'Created');
 
-INSERT INTO OutboxMessages(Id, Type, Payload, CreatedAt)
-VALUES (@messageId, 'OrderCreated', @payload, CURRENT_TIMESTAMP);
+INSERT INTO OutboxMessages(Id, Type, AggregateId, Payload, CreatedAt)
+VALUES (
+  @messageId,
+  'OrderCreated',
+  @orderId,
+  @payload,
+  CURRENT_TIMESTAMP
+);
 
 COMMIT;
 ```
 
-Worker:
+Relay hoặc worker:
 
 ```text
-Đọc outbox chưa xử lý
-Publish message
-Mark processed
-Nếu lỗi thì retry
+Đọc outbox chưa publish
+→ publish message
+→ đánh dấu processed
+→ retry nếu thất bại
 ```
 
-Outbox không đảm bảo consumer chỉ nhận đúng một lần. Nó thường hướng tới at-least-once delivery, nên consumer phải idempotent.
+Failure sau publish nhưng trước khi đánh dấu có thể tạo duplicate delivery. Consumer phải idempotent; outbox không tự tạo exactly-once end-to-end.
 
----
+### 6.3. Inbox và idempotent consumer
 
-## 27. Idempotency
-
-Idempotency nghĩa là gọi lại cùng một request/message nhiều lần vẫn không làm sai dữ liệu.
-
-Ví dụ thanh toán:
-
-```text
-Client gửi request thanh toán
-Server xử lý xong nhưng response bị timeout
-Client retry
-Nếu server charge tiền lần hai thì lỗi nghiêm trọng
-```
-
-Cách làm:
-
-- Dùng idempotency key
-- Lưu request key và kết quả xử lý
-- Unique constraint trên business key
-- Consumer kiểm tra message đã xử lý chưa
-
-Ví dụ:
-
-```sql
-CREATE UNIQUE INDEX UX_Payments_IdempotencyKey
-ON Payments(IdempotencyKey);
-```
-
-Khi retry cùng key:
-
-```text
-Nếu đã xử lý -> trả lại kết quả cũ
-Nếu đang xử lý -> trả trạng thái phù hợp hoặc chờ
-Nếu chưa có -> xử lý mới
-```
-
-Idempotency là bạn đồng hành bắt buộc của retry, outbox, queue và distributed workflow.
-
----
-
-## 28. Retry transaction
-
-Một số lỗi transaction có thể retry:
-
-- Deadlock victim
-- Serialization failure
-- Transient network/database error
-- Lock timeout trong một số nghiệp vụ cho phép thử lại
-
-Nhưng retry không phải thuốc chữa mọi lỗi.
-
-Chỉ retry khi:
-
-- Operation idempotent hoặc có idempotency key
-- Lỗi là transient
-- Có giới hạn số lần retry
-- Có backoff/jitter
-- Có log để theo dõi
-
-Không nên retry mù:
-
-```text
-Catch mọi exception rồi chạy lại 5 lần.
-```
-
-Vì có thể:
-
-- Ghi trùng dữ liệu
-- Gọi API ngoài nhiều lần
-- Làm tải database nặng hơn
-- Che mất bug logic
-
----
-
-## 29. Distributed transaction
-
-Distributed transaction là transaction trải qua nhiều database/service.
-
-Ví dụ:
-
-```text
-Service Order ghi database A
-Service Payment ghi database B
-Service Inventory ghi database C
-Tất cả phải cùng commit hoặc rollback
-```
-
-Có kỹ thuật như two-phase commit, nhưng trong microservices hiện đại thường tránh vì:
-
-- Phức tạp
-- Chậm
-- Khó vận hành
-- Coupling mạnh giữa service
-- Không phải hạ tầng nào cũng hỗ trợ tốt
-
-Thay vào đó thường dùng eventual consistency:
-
-- Saga
-- Outbox/inbox
-- Message broker
-- Compensating action
-- Reconciliation
-
-Tư duy senior:
-
-```text
-Không cố kéo một transaction database qua nhiều service nếu hệ thống không thật sự cần và không đủ năng lực vận hành nó.
-```
-
----
-
-## 30. Saga và compensating action
-
-Saga chia một nghiệp vụ dài thành nhiều bước nhỏ, mỗi bước có transaction riêng.
-
-Ví dụ đặt hàng:
-
-```text
-1. Create order
-2. Reserve inventory
-3. Charge payment
-4. Confirm order
-```
-
-Nếu bước 3 lỗi, hệ thống chạy compensating action:
-
-```text
-Release inventory
-Cancel order
-```
-
-Saga không rollback theo nghĩa database transaction. Nó sửa trạng thái bằng hành động bù.
-
-Cần thiết kế rõ:
-
-- State machine của saga
-- Bước nào retry được
-- Bước nào cần compensation
-- Compensation có idempotent không
-- Khi worker chết giữa chừng thì resume thế nào
-- Monitoring để phát hiện saga treo
-
-Saga phù hợp distributed workflow, không thay thế transaction database cho một cụm ghi local cần nhất quán mạnh.
-
----
-
-## 31. Transaction và message queue
-
-Gửi message trong transaction là nguồn lỗi kinh điển.
-
-Sai:
-
-```text
-Begin transaction
-Ghi Order
-Publish OrderCreated trực tiếp vào queue
-Commit lỗi
-```
-
-Consumer nhận `OrderCreated` nhưng Order rollback mất.
-
-Sai theo hướng ngược:
-
-```text
-Begin transaction
-Ghi Order
-Commit
-Publish OrderCreated lỗi
-```
-
-Order tồn tại nhưng event không đi.
-
-Giải pháp thường gặp:
-
-```text
-Ghi Order + OutboxMessage trong cùng transaction.
-Worker publish sau commit.
-Consumer idempotent.
-```
-
-Nếu broker/database hỗ trợ transaction chung thì vẫn phải cân nhắc chi phí vận hành. Đa số hệ thống business nên ưu tiên outbox/inbox rõ ràng.
-
----
-
-## 32. Transaction và cache
-
-Cache không tự rollback theo database.
-
-Vấn đề:
-
-```text
-Update database trong transaction
-Xóa cache trước commit
-Transaction rollback
-Cache đã bị xóa hoặc dữ liệu đọc lại lệch timing
-```
-
-Hoặc:
-
-```text
-Update database commit thành công
-Xóa cache lỗi
-User tiếp tục đọc cache cũ
-```
-
-Pattern thường dùng:
-
-- Invalidate cache sau commit
-- Dùng outbox/event để invalidate cache
-- TTL hợp lý
-- Cache-aside với fallback database
-- Với dữ liệu cực nhạy, hạn chế cache hoặc thiết kế consistency rõ
-
-Không nên cập nhật cache như một phần "ảo" của transaction nếu không có cơ chế đảm bảo đi kèm.
-
----
-
-## 33. Transaction và report/export
-
-Report lớn có thể làm ảnh hưởng transaction ghi.
-
-Vấn đề:
-
-- Query đọc lâu
-- Giữ snapshot/version lâu
-- Tốn IO/CPU
-- Chạy cùng database OLTP
-- Gây blocking nếu isolation/lock không phù hợp
-
-Hướng xử lý:
-
-- Read replica
-- Snapshot phù hợp
-- Bảng tổng hợp
-- Materialized view
-- Export theo batch
-- Giới hạn khoảng ngày
-- Queue report chạy nền
-- Tách OLTP và analytics khi hệ thống lớn
-
-Senior không ép một database transaction phục vụ mọi thứ. Cần tách workload đọc nặng khỏi ghi nóng khi dữ liệu lớn.
-
----
-
-## 34. Transaction quá dài
-
-Transaction dài là mùi nguy hiểm.
-
-Nguyên nhân:
-
-- Xử lý logic phức tạp sau khi begin transaction
-- Gọi API ngoài
-- Đọc/ghi quá nhiều dòng
-- Chờ user input
-- Export/report trong transaction
-- Batch update không chia nhỏ
-
-Hậu quả:
-
-- Lock lâu
-- Blocking tăng
-- Deadlock tăng
-- Version store/WAL/log phình
-- Replication lag
-- Rollback lâu nếu lỗi
-
-Nguyên tắc:
-
-```text
-Chuẩn bị dữ liệu trước transaction nếu có thể.
-Mở transaction muộn.
-Ghi nhanh.
-Commit sớm.
-```
-
----
-
-## 35. Transaction quá nhỏ
-
-Ngược lại, transaction quá nhỏ cũng gây sai.
-
-Ví dụ:
-
-```text
-Save Order -> commit
-Save OrderItems -> commit
-Update Stock -> commit
-```
-
-Nếu update stock lỗi, Order và OrderItems đã tồn tại. Trừ khi nghiệp vụ cho phép trạng thái trung gian và có cơ chế bù, đây là lỗi consistency.
-
-Câu hỏi cần hỏi:
-
-```text
-Những thay đổi nào phải cùng đúng tại một thời điểm?
-Những thay đổi nào có thể eventual consistency?
-Những thay đổi nào cần compensation nếu bước sau lỗi?
-```
-
-Transaction boundary tốt nằm giữa hai cực: không quá rộng, không quá vụn.
-
----
-
-## 36. Checklist thiết kế transaction cho một use case
-
-Khi thiết kế một nghiệp vụ ghi dữ liệu, đi theo checklist:
-
-1. Invariant nghiệp vụ cần bảo vệ là gì?
-2. Những bảng/dòng nào phải thay đổi cùng nhau?
-3. Có side effect ngoài database không?
-4. Có request đồng thời cùng tác động một dữ liệu không?
-5. Có nguy cơ lost update không?
-6. Cần optimistic hay pessimistic locking?
-7. Isolation level mặc định đã đủ chưa?
-8. Query update/delete có index phù hợp không?
-9. Transaction có gọi API ngoài, gửi email, publish queue không?
-10. Nếu commit thành công nhưng side effect lỗi thì xử lý thế nào?
-11. Nếu side effect thành công nhưng database rollback thì xử lý thế nào?
-12. Có cần outbox/inbox/saga/idempotency không?
-13. Lỗi deadlock/serialization failure có retry được không?
-14. Có log đủ transaction id, business id, idempotency key không?
-15. Có test concurrency không?
-
----
-
-## 37. Checklist review transaction ở mức Middle/Senior
-
-Một review transaction tốt nên hỏi:
-
-- Transaction boundary nằm ở layer nào?
-- Repository có tự commit ngoài ý muốn không?
-- Có nhiều connection/context làm mất cùng transaction không?
-- Có side effect ngoài database trong transaction không?
-- Có giữ transaction trong lúc await network không?
-- Có retry không, retry có idempotent không?
-- Có unique constraint để bảo vệ duplicate không?
-- Có chống lost update không?
-- Có xử lý affected rows khi update có điều kiện không?
-- Có nguy cơ deadlock do thứ tự update không?
-- Có index cho các câu `UPDATE/DELETE` quan trọng không?
-- Có log đủ để truy ngược khi rollback/deadlock/timeout không?
-- Có test case cho hai request chạy song song không?
-
-Ví dụ review chưa đủ:
-
-```text
-Đã bọc transaction rồi nên ổn.
-```
-
-Ví dụ review tốt hơn:
-
-```text
-Transaction đã bao Order + OrderItems + StockTransactions, nhưng đang publish event trực tiếp trước commit.
-Nên chuyển sang outbox để tránh event đi ra ngoài khi transaction rollback.
-Phần trừ kho dùng UPDATE ... WHERE StockQuantity >= @quantity và check affected rows, hướng này chống oversell tốt hơn read-check-write.
-Cần thêm retry có idempotency key cho deadlock/timeout vì client có thể gửi lại request tạo đơn.
-```
-
----
-
-## 38. Các lỗi production hay gặp
-
-### 38.1. Read-check-write gây lost update
-
-```text
-Đọc tồn kho -> check -> set tồn kho mới
-```
-
-Fix bằng atomic update có điều kiện hoặc locking phù hợp.
-
-### 38.2. Gửi event/email trong transaction
-
-Side effect không rollback được. Dùng outbox hoặc chạy sau commit có cơ chế retry.
-
-### 38.3. Transaction giữ quá lâu
-
-Không gọi API ngoài, không export, không xử lý file lớn khi transaction đang mở.
-
-### 38.4. Thiếu unique constraint
-
-Chỉ check trùng bằng `SELECT` trước khi insert không đủ an toàn khi có concurrent request.
-
-```sql
-CREATE UNIQUE INDEX UX_Users_Email ON Users(Email);
-```
-
-### 38.5. Không kiểm tra affected rows
-
-Với update có điều kiện, affected rows là tín hiệu nghiệp vụ quan trọng.
-
-```text
-0 row affected có thể nghĩa là hết tồn, dữ liệu đã đổi, hoặc quyền không hợp lệ.
-```
-
-### 38.6. Retry không idempotent
-
-Retry một operation tạo dữ liệu mà không có idempotency key dễ tạo trùng đơn, trùng payment, trùng phiếu.
-
-### 38.7. Transaction trong loop lớn
-
-Một transaction xử lý hàng trăm nghìn dòng dễ làm log phình và lock lâu. Cần batch, checkpoint, hoặc job nền.
-
----
-
-## 39. Ví dụ thực tế: tạo đơn hàng và trừ kho
-
-Yêu cầu:
-
-- Tạo đơn hàng
-- Tạo dòng hàng
-- Trừ tồn kho
-- Không cho tồn âm
-- Phát event `OrderCreated`
-- Cho phép client retry khi timeout
-
-Thiết kế tốt hơn:
-
-```text
-1. Client gửi IdempotencyKey
-2. Begin transaction
-3. Kiểm tra IdempotencyKey đã xử lý chưa
-4. Insert Order
-5. Insert OrderItems
-6. Trừ kho bằng atomic update có điều kiện
-7. Insert StockTransactions
-8. Insert OutboxMessage(OrderCreated)
-9. Commit
-10. Worker publish OutboxMessage
-```
-
-SQL ý tưởng:
+Consumer lưu `MessageId` đã xử lý:
 
 ```sql
 BEGIN TRANSACTION;
 
-INSERT INTO Orders(Id, CustomerId, Status, IdempotencyKey)
-VALUES (@orderId, @customerId, 'Created', @idempotencyKey);
+INSERT INTO InboxMessages(MessageId, ProcessedAt)
+VALUES (@messageId, CURRENT_TIMESTAMP);
 
-INSERT INTO OrderItems(OrderId, ProductId, Quantity, Price)
-VALUES (@orderId, @productId, @quantity, @price);
+-- Unique constraint trên MessageId
+-- Thực hiện business update
+
+COMMIT;
+```
+
+Nếu duplicate message đến, unique constraint giúp nhận biết message đã được xử lý.
+
+Business operation vẫn nên idempotent khi có thể, vì duplicate có thể xuất hiện ở nhiều boundary khác nhau.
+
+### 6.4. Saga và compensating action
+
+Một workflow qua nhiều service thường không thể dùng local transaction chung:
+
+```text
+Create Order
+→ Reserve Inventory
+→ Authorize Payment
+→ Confirm Order
+```
+
+Saga chia workflow thành nhiều local transaction. Nếu bước sau thất bại, hệ thống chạy hành động bù:
+
+```text
+Payment thất bại
+→ Release Inventory
+→ Cancel Order
+```
+
+Compensation không phải rollback vật lý. Nó là một business transition mới và cũng có thể thất bại, retry hoặc bị xử lý trùng.
+
+Saga cần:
+
+- State machine rõ ràng.
+- Correlation ID.
+- Timeout cho từng bước.
+- Idempotent command và compensation.
+- Cơ chế resume sau crash.
+- Reconciliation cho workflow bị kẹt.
+
+### 6.5. Cache sau commit
+
+Cache không cùng transaction với database.
+
+Failure window:
+
+```text
+Database commit thành công
+→ cache invalidation thất bại
+→ reader tiếp tục thấy dữ liệu cũ
+```
+
+Các lựa chọn:
+
+- Invalidate sau commit với retry.
+- Phát invalidation event qua outbox.
+- TTL giới hạn thời gian stale.
+- Versioned cache key.
+- Không cache dữ liệu cần strong consistency.
+
+Consistency của cache phải được mô tả như một contract, không nên chỉ dựa vào thứ tự gọi trong code.
+
+---
+
+## 7. Vận hành và chẩn đoán
+
+### 7.1. Transaction dài tạo áp lực gì?
+
+Transaction dài có thể giữ:
+
+- Lock.
+- Connection.
+- Row version cũ.
+- Undo record hoặc WAL/log chưa thể reclaim.
+- Snapshot làm cleanup/vacuum bị trì hoãn.
+- Resource phục vụ rollback.
+
+Triệu chứng production:
+
+- Blocking chain tăng.
+- Lock timeout.
+- Deadlock tăng.
+- Version store hoặc table bloat tăng.
+- Transaction log tăng bất thường.
+- Replica lag.
+- Rollback mất nhiều thời gian.
+
+### 7.2. Phân biệt blocking, deadlock và timeout
+
+```text
+Blocking
+Transaction B đang chờ A; A vẫn có thể tiến tới commit.
+
+Deadlock
+A chờ B và B chờ A theo một chu trình.
+Database phải abort ít nhất một transaction.
+
+Timeout
+Một operation chờ quá giới hạn do application hoặc database cấu hình.
+Không nhất thiết tồn tại chu trình.
+```
+
+Ba hiện tượng có cách điều tra và retry khác nhau.
+
+### 7.3. Dữ liệu cần thu thập
+
+Khi xảy ra sự cố:
+
+- Transaction/session ID.
+- Business ID và correlation ID.
+- Thời điểm begin, commit hoặc rollback.
+- Câu SQL đang chạy và execution plan.
+- Isolation level.
+- Lock đang giữ và lock đang chờ.
+- Blocking head/root blocker.
+- Deadlock graph hoặc serialization error.
+- Số row và page bị đọc/ghi.
+- Retry count và idempotency key.
+- Thời gian gọi external dependency nếu transaction đang mở.
+
+Không nên log payload nhạy cảm hoặc toàn bộ SQL parameter nếu vi phạm bảo mật. Business key và correlation ID thường đủ để truy vết.
+
+### 7.4. Test concurrency
+
+Unit test tuần tự không phát hiện được phần lớn race condition.
+
+Một concurrency test nên:
+
+1. Tạo trạng thái ban đầu xác định.
+2. Dùng barrier để nhiều worker bắt đầu cùng thời điểm.
+3. Thực thi operation trên connection/context riêng.
+4. Thu thập kết quả thành công, conflict và exception.
+5. Kiểm tra invariant cuối cùng trong database.
+6. Lặp lại đủ số lần để tăng xác suất interleaving nguy hiểm.
+
+Ví dụ trừ tồn:
+
+```text
+Initial Stock = 10
+20 request đồng thời, mỗi request trừ 1
+
+Expected:
+├── Chính xác 10 request thành công
+├── 10 request thất bại theo contract nghiệp vụ
+└── Stock cuối cùng = 0
+```
+
+Test phải kiểm tra trạng thái cuối, không chỉ kiểm tra “không có exception”.
+
+### 7.5. Reconciliation
+
+Ngay cả khi transaction local đúng, hệ thống phân tán vẫn có thể lệch do:
+
+- Message bị trì hoãn.
+- Consumer lỗi kéo dài.
+- Bug cũ đã ghi dữ liệu sai.
+- Manual operation.
+- External provider trả kết quả không rõ ràng.
+
+Reconciliation job so sánh source of truth với trạng thái liên quan và tạo cảnh báo hoặc repair action. Đây là lớp an toàn vận hành, không phải lý do để bỏ constraint và transaction đúng.
+
+---
+
+## 8. tạo đơn hàng và giữ tồn kho
+
+### 8.1. Yêu cầu
+
+- Client có thể retry khi timeout.
+- Không tạo trùng order.
+- Không bán vượt tồn kho.
+- Order, items và stock movement phải cùng commit.
+- Event `OrderCreated` không được mất.
+- Không giữ transaction khi publish message.
+
+### 8.2. Invariant
+
+```text
+StockQuantity >= 0
+Một IdempotencyKey chỉ tạo một Order
+Order total khớp với OrderItems đã chấp nhận
+Mỗi lần giảm tồn có một StockTransaction tương ứng
+OrderCreated chỉ được phát cho Order đã commit
+```
+
+### 8.3. Boundary
+
+```text
+Ngoài transaction
+├── Validate request shape
+├── Load cấu hình ít thay đổi
+└── Tạo OrderId, MessageId
+
+Trong transaction
+├── Claim IdempotencyKey
+├── Insert Order
+├── Insert OrderItems
+├── Atomic conditional update Stock
+├── Insert StockTransaction
+└── Insert OutboxMessage
+
+Sau transaction
+└── Outbox relay publish OrderCreated
+```
+
+### 8.4. SQL minh họa
+
+```sql
+BEGIN TRANSACTION;
+
+INSERT INTO RequestDeduplications(
+  IdempotencyKey,
+  RequestHash,
+  ResourceId,
+  Status
+)
+VALUES (
+  @idempotencyKey,
+  @requestHash,
+  @orderId,
+  'Processing'
+);
+
+INSERT INTO Orders(Id, CustomerId, Status, TotalAmount)
+VALUES (@orderId, @customerId, 'Created', @totalAmount);
+
+INSERT INTO OrderItems(OrderId, ProductId, Quantity, UnitPrice)
+VALUES (@orderId, @productId, @quantity, @unitPrice);
 
 UPDATE Products
 SET StockQuantity = StockQuantity - @quantity
 WHERE Id = @productId
   AND StockQuantity >= @quantity;
 
--- Nếu affected rows = 0: rollback và trả lỗi không đủ tồn
+-- Nếu affected rows = 0: rollback và trả lỗi nghiệp vụ
 
-INSERT INTO StockTransactions(ProductId, Quantity, RefId)
+INSERT INTO StockTransactions(ProductId, Quantity, ReferenceId)
 VALUES (@productId, -@quantity, @orderId);
 
-INSERT INTO OutboxMessages(Id, Type, Payload)
-VALUES (@messageId, 'OrderCreated', @payload);
+INSERT INTO OutboxMessages(Id, Type, AggregateId, Payload, CreatedAt)
+VALUES (
+  @messageId,
+  'OrderCreated',
+  @orderId,
+  @payload,
+  CURRENT_TIMESTAMP
+);
+
+UPDATE RequestDeduplications
+SET Status = 'Completed'
+WHERE IdempotencyKey = @idempotencyKey;
 
 COMMIT;
 ```
 
-Ràng buộc nên có:
+Constraint:
 
 ```sql
-CREATE UNIQUE INDEX UX_Orders_IdempotencyKey
-ON Orders(IdempotencyKey);
+CREATE UNIQUE INDEX UX_RequestDeduplications_IdempotencyKey
+ON RequestDeduplications(IdempotencyKey);
 ```
 
-Điểm quan trọng:
+### 8.5. Hai request cùng IdempotencyKey
 
-- Không publish event trực tiếp trong transaction
-- Không read-check-write tồn kho theo kiểu ghi đè
-- Có unique key để chống retry tạo trùng
-- Có outbox để event không mất
-- Có thể retry deadlock vì operation có idempotency key
+Request đầu tiên insert deduplication record. Request thứ hai gặp unique conflict hoặc nhìn thấy record hiện có.
+
+Application phải so sánh `RequestHash`:
+
+```text
+Cùng key + cùng request
+→ trả kết quả đã có hoặc trạng thái đang xử lý
+
+Cùng key + payload khác
+→ từ chối vì idempotency key bị tái sử dụng sai
+```
+
+### 8.6. Hai request mua cùng sản phẩm
+
+Atomic conditional update tạo điểm phân xử trong database:
+
+```text
+Stock đủ
+→ update thắng và giữ invariant
+
+Stock không còn đủ tại thời điểm write
+→ affected rows = 0
+→ rollback transaction
+```
+
+Không cần tin vào giá trị stock đã đọc trước đó.
+
+### 8.7. Process dừng sau commit
+
+Nếu process dừng sau commit nhưng trước response:
+
+- Client retry với cùng idempotency key.
+- Server tìm deduplication record đã hoàn thành.
+- Server trả lại Order đã tạo thay vì insert lần nữa.
+
+Nếu process dừng trước khi publish:
+
+- OutboxMessage vẫn tồn tại.
+- Relay publish ở lần chạy sau.
+
+Nếu relay publish rồi dừng trước khi đánh dấu:
+
+- Message có thể được publish lại.
+- Consumer dùng inbox/idempotency để bỏ qua duplicate effect.
 
 ---
 
-## 40. Câu tổng kết
+## 9. Khung quyết định và checklist
 
-Junior thường nhìn transaction như cú pháp:
+### 9.1. Chọn cơ chế theo loại invariant
 
-```sql
-BEGIN;
-COMMIT;
-ROLLBACK;
-```
+| Bài toán                                    | Cơ chế ưu tiên                                   |
+| ------------------------------------------- | ------------------------------------------------ |
+| Không trùng business key                    | Unique constraint                                |
+| Không cho số lượng xuống âm                 | Atomic conditional update                        |
+| Phát hiện user ghi đè dữ liệu cũ            | Optimistic version                               |
+| Giữ quyền cập nhật resource trong flow ngắn | Pessimistic lock                                 |
+| Bảo vệ predicate hoặc invariant đa row      | Serializable hoặc explicit locking có kiểm chứng |
+| Retry request tạo dữ liệu                   | Idempotency key + unique constraint              |
+| Ghi database và phát event                  | Transactional outbox                             |
+| Consumer nhận message lặp                   | Inbox/idempotent consumer                        |
+| Workflow qua nhiều service                  | Saga + compensation + reconciliation             |
 
-Middle bắt đầu nhìn transaction theo use case:
+### 9.2. Checklist thiết kế
+
+- Invariant được viết thành câu kiểm chứng được chưa?
+- Những bảng hoặc aggregate nào phải commit cùng nhau?
+- Constraint nào có thể đặt tại database?
+- Có read-check-write gây race condition không?
+- `affected rows = 0` mang ý nghĩa nghiệp vụ gì?
+- Isolation mặc định có bảo vệ đủ invariant không?
+- Có contention trên hot key hoặc hot range không?
+- Cần optimistic hay pessimistic concurrency?
+- Query ghi có access path phù hợp không?
+- Transaction có chờ network, file hoặc user input không?
+- ORM có dùng cùng connection/context không?
+- Ai sở hữu commit và rollback?
+- Có ambiguous outcome quanh commit không?
+- Retry có chạy lại toàn bộ transaction và có idempotent không?
+- Side effect ngoài database đi qua outbox hay cơ chế nào?
+- Có metric cho duration, retry, rollback, blocking và deadlock không?
+- Có test nhiều request chạy đồng thời và kiểm tra invariant cuối không?
+
+### 9.3. Checklist review production incident
 
 ```text
-Bảng nào phải cùng commit?
-Nếu lỗi giữa chừng thì rollback gì?
-Isolation mặc định có đủ không?
+1. Xác định invariant đã bị phá hay chỉ latency tăng.
+2. Xác định transaction/session gây blocking hoặc conflict.
+3. Thu thập SQL, plan, isolation level và lock/version state.
+4. Xác định boundary thực tế trong application.
+5. Kiểm tra external call hoặc batch nằm trong transaction.
+6. Kiểm tra index của UPDATE/DELETE.
+7. Kiểm tra retry và idempotency.
+8. Sửa correctness trước, sau đó tối ưu contention và throughput.
 ```
 
-Senior nhìn transaction như một quyết định thiết kế và vận hành:
+### 9.4. Nguyên tắc tổng kết
 
 ```text
-Invariant nào cần bảo vệ?
-Concurrency thực tế ra sao?
-Lock giữ bao lâu?
-Deadlock retry thế nào?
-Side effect ngoài database xử lý bằng pattern gì?
-Boundary có quá rộng hoặc quá nhỏ không?
-Nếu request retry thì có idempotent không?
-Nếu dữ liệu tăng 10 lần thì còn ổn không?
+Transaction đúng
+= boundary đúng
++ invariant được thực thi tại write path
++ isolation phù hợp
++ failure handling rõ ràng
++ side effect có cơ chế nhất quán riêng
++ khả năng quan sát và kiểm chứng khi chạy đồng thời
 ```
 
-**Kết luận**: Transaction tốt không phải cứ bọc thật nhiều code vào `BEGIN/COMMIT`. Transaction tốt là boundary đủ hẹp để chạy nhanh, đủ rộng để bảo vệ invariant, có isolation/concurrency phù hợp, và phối hợp đúng với side effect ngoài database bằng outbox, idempotency, retry hoặc saga khi cần.
+`BEGIN/COMMIT` chỉ là lớp vỏ. Chất lượng thiết kế nằm ở việc hệ thống vẫn giữ đúng invariant khi request chạy đồng thời, process dừng giữa chừng, client retry và các dependency bên ngoài thất bại.

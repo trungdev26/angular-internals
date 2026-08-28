@@ -1,9 +1,42 @@
-<nz-layout class="app-layout">
-  <nz-sider class="app-sider" nzCollapsible [(nzCollapsed)]="collapsed" [nzWidth]="248" nzTheme="light">
-    <div class="logo">
-      <span class="logo__badge">DI</span>
-      <span class="logo__text">Dev Internals</span>
-    </div>
+<nz-layout
+  class="app-layout"
+  [class.is-mobile-menu-open]="mobileMenuOpen"
+  [class.is-focus-mode]="focusMode"
+>
+  <div class="reading-progress" [style.width.%]="readingProgress"></div>
+
+  <button
+    class="mobile-scrim"
+    type="button"
+    aria-label="Close navigation"
+    (click)="closeMobileMenu()"
+  ></button>
+
+  <nz-sider
+    class="app-sider"
+    nzCollapsible
+    [(nzCollapsed)]="collapsed"
+    [nzWidth]="sidebarWidth"
+    nzTheme="light"
+  >
+    <a class="brand" routerLink="/angular/change-detection/theory" (click)="closeMobileMenu()">
+      <span class="brand__mark">DI</span>
+      <span class="brand__copy">
+        <strong>Dev Internals</strong>
+        <small>Engineering notes</small>
+      </span>
+    </a>
+
+    <button *ngIf="!collapsed" class="sidebar-search" type="button" (click)="openSearch()">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="11" cy="11" r="6.5"></circle>
+        <path d="m16 16 4 4"></path>
+      </svg>
+      <span>Search documentation</span>
+      <kbd>Ctrl K</kbd>
+    </button>
+
+    <div class="sidebar-label" *ngIf="!collapsed">Knowledge library</div>
     <ul nz-menu class="app-menu" nzMode="inline" nzTheme="light" [nzInlineCollapsed]="collapsed">
       <li
         nz-submenu
@@ -22,52 +55,294 @@
             [title]="item.label"
             [routerLink]="item.link"
             routerLinkActive="ant-menu-item-selected"
+            (click)="closeMobileMenu()"
           >
             {{ item.label }}
           </li>
-          <li
-            nz-submenu
-            *ngFor="let group of section.groups"
-            class="app-menu__group"
-            [nzTitle]="group.title"
-            [title]="group.title"
-            [nzIcon]="group.icon"
-            [(nzOpen)]="group.open"
-            [nzDisabled]="!!group.disabled"
-          >
-            <ul>
+          <ng-container *ngFor="let group of section.groups">
+            <li
+              *ngIf="group.link; else groupSubmenu"
+              nz-menu-item
+              class="app-menu__group"
+              [nzDisabled]="!!group.disabled"
+              [title]="group.title"
+              [routerLink]="group.link"
+              routerLinkActive="ant-menu-item-selected"
+              (click)="closeMobileMenu()"
+            >
+              <span>{{ group.title }}</span>
+            </li>
+            <ng-template #groupSubmenu>
               <li
-                nz-menu-item
-                *ngFor="let item of group.items"
-                [nzDisabled]="!item.link"
-                [title]="item.label"
-                [routerLink]="item.link"
-                routerLinkActive="ant-menu-item-selected"
+                nz-submenu
+                class="app-menu__group"
+                [nzTitle]="group.title"
+                [title]="group.title"
+                [(nzOpen)]="group.open"
+                [nzDisabled]="!!group.disabled"
               >
-                {{ item.label }}
+                <ul>
+                  <ng-container
+                    *ngTemplateOutlet="menuItemTree; context: { $implicit: group.items, depth: 0 }"
+                  ></ng-container>
+                </ul>
               </li>
-            </ul>
-          </li>
+            </ng-template>
+          </ng-container>
         </ul>
       </li>
+
+      <ng-template #menuItemTree let-items let-depth="depth">
+        <ng-container *ngFor="let item of items">
+          <li
+            *ngIf="item.children?.length; else treeLeafItem"
+            nz-submenu
+            class="app-menu__child-group"
+            [style.--menu-depth]="depth"
+            [nzTitle]="item.label"
+            [title]="item.label"
+            [(nzOpen)]="item.open"
+          >
+            <ul>
+              <ng-container
+                *ngTemplateOutlet="
+                  menuItemTree;
+                  context: { $implicit: item.children, depth: depth + 1 }
+                "
+              ></ng-container>
+            </ul>
+          </li>
+          <ng-template #treeLeafItem>
+            <li
+              nz-menu-item
+              class="app-menu__group-item"
+              [style.--menu-depth]="depth"
+              [nzDisabled]="!item.link"
+              [title]="item.label"
+              routerLinkActive="ant-menu-item-selected"
+              (click)="closeMobileMenu()"
+            >
+              <a class="app-menu__item-link" [routerLink]="item.link">{{ item.label }}</a>
+            </li>
+          </ng-template>
+        </ng-container>
+      </ng-template>
     </ul>
+
+    <button
+      *ngIf="!collapsed"
+      class="sidebar-resize-handle"
+      type="button"
+      role="separator"
+      aria-label="Resize sidebar"
+      aria-orientation="vertical"
+      [attr.aria-valuemin]="sidebarMinWidth"
+      [attr.aria-valuemax]="sidebarMaxWidth"
+      [attr.aria-valuenow]="sidebarWidth"
+      title="Drag to resize sidebar"
+      (pointerdown)="startSidebarResize($event)"
+      (keydown)="resizeSidebarByKeyboard($event)"
+    ></button>
   </nz-sider>
-  <nz-layout>
-    <nz-header class="app-header">Dev Internals Docs</nz-header>
+
+  <nz-layout class="workspace">
+    <nz-header class="app-header">
+      <button
+        class="header-icon mobile-menu-toggle"
+        type="button"
+        (click)="toggleMobileMenu()"
+        aria-label="Open navigation"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+      </button>
+
+      <div class="header-title">
+        <span class="header-title__eyebrow">{{ currentSection }}</span>
+        <span class="header-title__text">{{ currentTitle }}</span>
+      </div>
+
+      <div class="header-actions">
+        <button
+          class="header-search"
+          type="button"
+          (click)="openSearch()"
+          aria-label="Search documentation"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5"></circle>
+            <path d="m16 16 4 4"></path>
+          </svg>
+          <span>Search</span>
+          <kbd>Ctrl K</kbd>
+        </button>
+
+        <button
+          class="header-icon"
+          type="button"
+          [class.is-active]="isCurrentBookmarked"
+          (click)="toggleBookmark()"
+          [attr.aria-label]="isCurrentBookmarked ? 'Remove bookmark' : 'Bookmark this page'"
+          [title]="isCurrentBookmarked ? 'Remove bookmark' : 'Bookmark this page'"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 4.5h10v15l-5-3-5 3z"></path>
+          </svg>
+        </button>
+
+        <button
+          class="header-icon"
+          type="button"
+          (click)="cycleTheme()"
+          [attr.aria-label]="themeLabel"
+          [title]="themeLabel"
+        >
+          <svg *ngIf="!isDarkTheme" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.5"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+            ></path>
+          </svg>
+          <svg *ngIf="isDarkTheme" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M19.5 14.7A8 8 0 0 1 9.3 4.5 8 8 0 1 0 19.5 14.7z"></path>
+          </svg>
+        </button>
+
+        <button
+          class="focus-toggle"
+          type="button"
+          [class.is-active]="focusMode"
+          (click)="toggleFocusMode()"
+          [attr.aria-label]="focusMode ? 'Exit focus mode' : 'Enter focus mode'"
+        >
+          <i></i>
+          <span>{{ focusMode ? 'Exit focus' : 'Focus mode' }}</span>
+        </button>
+      </div>
+    </nz-header>
+
     <nz-content class="app-content" #appContent (scroll)="onContentScroll($event)">
-      <router-outlet></router-outlet>
+      <main class="reading-surface">
+        <router-outlet></router-outlet>
+
+        <nav class="article-navigation" aria-label="Article navigation">
+          <a *ngIf="previousItem" class="article-navigation__item" [routerLink]="previousItem.link">
+            <small>← Previous</small>
+            <strong>{{ previousItem.context }}</strong>
+            <span>{{ previousItem.section }}</span>
+          </a>
+          <span *ngIf="!previousItem"></span>
+          <a *ngIf="nextItem" class="article-navigation__item is-next" [routerLink]="nextItem.link">
+            <small>Next →</small>
+            <strong>{{ nextItem.context }}</strong>
+            <span>{{ nextItem.section }}</span>
+          </a>
+        </nav>
+      </main>
     </nz-content>
   </nz-layout>
 </nz-layout>
+
+<div class="command-backdrop" *ngIf="searchOpen" (mousedown)="closeSearch()">
+  <section
+    class="command-palette"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Search documentation"
+    (mousedown)="$event.stopPropagation()"
+  >
+    <div class="command-search">
+      <span class="command-search__icon">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.5"></circle>
+          <path d="m16 16 4 4"></path>
+        </svg>
+      </span>
+      <input
+        #searchInput
+        type="search"
+        [(ngModel)]="searchQuery"
+        (ngModelChange)="onSearchQueryChange()"
+        placeholder="Search topics, technologies, case studies..."
+        autocomplete="off"
+        aria-label="Search topics"
+      />
+      <kbd>ESC</kbd>
+    </div>
+
+    <div class="command-scopes" role="tablist">
+      <button type="button" [class.active]="searchScope === 'all'" (click)="setSearchScope('all')">
+        All topics
+      </button>
+      <button
+        type="button"
+        [class.active]="searchScope === 'bookmarks'"
+        (click)="setSearchScope('bookmarks')"
+      >
+        Bookmarks <span>{{ bookmarks.size }}</span>
+      </button>
+      <button
+        type="button"
+        [class.active]="searchScope === 'recent'"
+        (click)="setSearchScope('recent')"
+      >
+        Recent
+      </button>
+    </div>
+
+    <div class="command-results-heading">
+      <span>{{ searchQuery ? 'Search results' : 'Explore the library' }}</span>
+      <small>{{ searchResults.length }} shown</small>
+    </div>
+
+    <div class="command-results" [class.is-compact]="searchResults.length < 4" role="listbox">
+      <button
+        *ngFor="let result of searchResults; let index = index"
+        type="button"
+        class="command-result"
+        [class.active]="index === activeSearchIndex"
+        (mouseenter)="activeSearchIndex = index"
+        (click)="navigateTo(result.link)"
+        role="option"
+        [attr.aria-selected]="index === activeSearchIndex"
+      >
+        <span class="command-result__icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 3.5h7l3 3V20H7z" />
+            <path d="M14 3.5V7h3M9.5 11h5M9.5 14h5M9.5 17h3.5" />
+          </svg>
+        </span>
+        <span class="command-result__copy">
+          <strong>{{ result.context }}</strong>
+          <small>{{ result.section }} · {{ result.label }}</small>
+        </span>
+        <span class="command-result__status" *ngIf="bookmarks.has(result.link)">★</span>
+        <kbd [class.is-visible]="index === activeSearchIndex" aria-hidden="true">↵</kbd>
+      </button>
+
+      <div class="command-empty" *ngIf="!searchResults.length">
+        <span>⌕</span>
+        <strong>No matching topics</strong>
+        <small>Try another keyword or search scope.</small>
+      </div>
+    </div>
+
+    <footer class="command-footer">
+      <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
+      <span><kbd>↵</kbd> Open</span>
+      <span>{{ navigationItems.length }} searchable articles</span>
+    </footer>
+  </section>
+</div>
 
 <button
   type="button"
   class="back-to-top"
   [class.visible]="showBackToTop"
   (click)="scrollToTop()"
-  aria-label="Lên đầu trang"
+  aria-label="Back to top"
+  title="Back to top"
 >
-  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-    <path d="M12 5l-7 7h4v7h6v-7h4z" />
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="m7 14 5-5 5 5" />
   </svg>
 </button>

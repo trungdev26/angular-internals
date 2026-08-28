@@ -1,4 +1,4 @@
-# Case Study 02. Hàng chờ khám bệnh và điều phối lượt khám
+# Hàng chờ khám bệnh và điều phối lượt khám
 
 Bài toán hàng chờ khám bệnh không nên được nhìn như một API trả về `currentNumber` và `waitingCount`. Nó là một bài toán điều phối trạng thái có nhiều người cùng thao tác, nhiều màn hình cùng đọc, và nhiều ngoại lệ nghiệp vụ như bỏ lượt, gọi lại, chuyển phòng, ưu tiên, hoặc khám nhiều chặng.
 

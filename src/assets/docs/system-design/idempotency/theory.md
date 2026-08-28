@@ -1,4 +1,6 @@
 # Idempotency in System Design
+
+> Xem [diagram HTTP retry và Kafka redelivery](/system-design/idempotency/demo) để theo dõi idempotency record trong database, Redis fast-path, Kafka offset và Inbox qua từng bước.
  
 > Thiết kế thao tác an toàn khi retry, timeout, duplicate request, duplicate message, webhook resend và background job chạy lại.
 

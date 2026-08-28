@@ -1,782 +1,452 @@
-# Index trong Database
+# Index và chiến lược truy cập dữ liệu
 
-Index là một cấu trúc dữ liệu phụ giúp database tìm dòng nhanh hơn. Nếu bảng là một cuốn sách, index giống mục lục: thay vì đọc từ đầu đến cuối, database đi theo cấu trúc đã sắp xếp để đến đúng vùng dữ liệu cần tìm.
+Index là cấu trúc dữ liệu phụ giúp database định vị row theo một giá trị hoặc thứ tự cụ thể mà không phải đọc toàn bộ bảng. Index lưu key đã được tổ chức để tìm kiếm cùng thông tin định vị row tương ứng trong bảng.
 
-Nhưng index không phải "cứ thêm là nhanh". Index giúp tăng tốc đọc, đổi lại làm chậm ghi, tốn dung lượng, và có thể khiến optimizer chọn plan sai nếu thiết kế không đúng.
+Một index chỉ hữu ích khi cấu trúc của nó phù hợp với access pattern của truy vấn. Điều kiện lọc, phép nối, thứ tự sắp xếp, số row cần trả về và phân bố dữ liệu đều ảnh hưởng đến quyết định sử dụng index.
 
----
+Index cải thiện một số thao tác đọc nhưng làm tăng dung lượng và chi phí `INSERT`, `UPDATE`, `DELETE`. Vì vậy, thiết kế index là quyết định cho toàn workload, không phải thao tác thêm index cho mọi cột xuất hiện trong `WHERE`.
 
-## 1. Index giải quyết vấn đề gì?
+## Thành phần của index
 
-Khi không có index phù hợp, database thường phải đọc nhiều dòng để tìm kết quả.
+Một index entry thường gồm hai phần:
 
-```sql
-SELECT *
-FROM Orders
-WHERE CustomerId = 10;
-```
-
-Nếu bảng `Orders` có 10 triệu dòng và không có index trên `CustomerId`, database có thể phải quét rất nhiều dòng. Đây thường gọi là **table scan** hoặc **full scan**.
-
-Nếu có index:
-
-```sql
-CREATE INDEX IX_Orders_CustomerId ON Orders(CustomerId);
-```
-
-Database có thể đi vào index theo `CustomerId = 10`, lấy danh sách row cần đọc, rồi trả kết quả nhanh hơn nhiều.
-
----
-
-## 2. Hiểu đúng: Index là dữ liệu phụ, không phải phép màu
-
-Một index thường chứa:
-
-- Giá trị của cột được index
-- Con trỏ hoặc khóa trỏ về dòng dữ liệu thật
-- Cấu trúc sắp xếp giúp tìm kiếm nhanh
-
-Vì là dữ liệu phụ nên mỗi lần `INSERT`, `UPDATE`, `DELETE`, database phải cập nhật cả bảng chính và các index liên quan.
+- **Index key:** giá trị được tổ chức để tìm kiếm hoặc sắp xếp.
+- **Row locator:** thông tin giúp database định vị row tương ứng trong bảng.
 
 ```text
-Nhiều index hơn -> đọc có thể nhanh hơn
-Nhiều index hơn -> ghi chậm hơn, storage tăng, maintenance nặng hơn
+Index
+  key = 42
+  row locator ──────────► Row trong bảng
 ```
 
-Senior không hỏi "có nên thêm index không?" một cách chung chung. Senior hỏi: **query nào đang chậm, pattern truy vấn là gì, index này có đáng với chi phí ghi và dung lượng không?**
+Nếu query cần các cột không có trong index, database dùng row locator để đọc row từ bảng. Thao tác quay lại bảng có chi phí nhỏ khi chỉ xảy ra vài lần, nhưng có thể trở thành bottleneck khi lặp lại trên hàng trăm nghìn row.
 
----
+## Cấu trúc B-tree
 
-## 3. Các loại scan/seek thường gặp
-
-Tên gọi khác nhau giữa SQL Server, PostgreSQL, MySQL, nhưng tư duy tương tự.
-
-| Hành vi | Ý nghĩa | Thường tốt/xấu |
-|---|---|---|
-| Table Scan / Seq Scan | Quét toàn bảng | Xấu nếu bảng lớn và chỉ cần ít dòng |
-| Index Scan | Quét một phần/lớn index | Có thể ổn, nhưng vẫn đọc nhiều |
-| Index Seek | Nhảy đến vùng index cần tìm | Thường tốt cho filter chọn lọc |
-| Key Lookup / Bookmark Lookup | Từ index phụ quay lại bảng lấy cột còn thiếu | Tốt khi ít dòng, xấu khi lặp quá nhiều |
-
-Đừng chỉ thấy `Index Scan` là xấu hoặc `Index Seek` là tốt tuyệt đối. Query trả về 70% bảng thì scan có khi hợp lý hơn seek + lookup hàng triệu lần.
-
----
-
-## 4. B-Tree Index: loại index phổ biến nhất
-
-Phần lớn index mặc định trong database quan hệ là B-Tree hoặc biến thể gần giống B+Tree.
+B-tree là cấu trúc index phổ biến cho dữ liệu có thứ tự. Cây gồm root node, các internal node và leaf node:
 
 ```text
 Root
- └─ Intermediate pages
-     └─ Leaf pages
-         └─ Key + row locator / data
+  ├─ Internal node
+  │    ├─ Leaf: key nhỏ
+  │    └─ Leaf: key trung bình
+  └─ Internal node
+       └─ Leaf: key lớn
 ```
 
-B-Tree tốt cho:
+Internal node giúp loại bỏ những nhánh không thể chứa key cần tìm. Leaf node giữ các key theo thứ tự và liên kết đến row tương ứng.
 
-- So sánh bằng: `=`
-- So sánh range: `>`, `<`, `BETWEEN`
-- Sắp xếp: `ORDER BY`
-- Prefix search: `LIKE 'abc%'`
-- Join theo khóa
+B-tree phù hợp với:
 
-B-Tree thường không tốt cho:
+- So sánh bằng: `=`.
+- So sánh phạm vi: `<`, `<=`, `>`, `>=`, `BETWEEN`.
+- `ORDER BY`.
+- Prefix search như `LIKE 'abc%'` khi collation và operator cho phép.
+- Join theo key.
+- Tìm giá trị đầu hoặc cuối theo thứ tự.
 
-- `LIKE '%abc'` hoặc `LIKE '%abc%'`
-- Function bọc quanh cột nếu không có computed/function-based index
-- Điều kiện có selectivity quá thấp
+B-tree không phù hợp trực tiếp với:
 
----
+- Contains search như `LIKE '%abc%'`.
+- Tìm phần tử bên trong document hoặc collection.
+- Dữ liệu không gian.
+- Operator không duy trì quan hệ thứ tự trên key.
 
-## 5. Clustered và Nonclustered Index
+Những bài toán này cần index type hoặc search structure phù hợp với operator thay vì thêm một B-tree tương tự.
 
-Trong SQL Server, khái niệm này rất quan trọng.
+## Access Paths
 
-### 5.1. Clustered Index
+Access path là cách execution plan chọn để lấy row từ bảng. Có index không đồng nghĩa database luôn dùng index.
 
-Clustered index quyết định thứ tự lưu vật lý hoặc logic gần với thứ tự dữ liệu của bảng. Mỗi bảng thường chỉ có một clustered index.
+| Access path | Cách đọc dữ liệu | Phù hợp khi |
+|---|---|---|
+| Table scan | Đọc tuần tự toàn bộ hoặc phần lớn bảng | Bảng nhỏ hoặc query cần phần lớn row |
+| Index lookup | Đi trực tiếp đến một key hoặc một phạm vi key | Predicate chọn ít row |
+| Index range scan | Đọc một đoạn liên tiếp của index | Range predicate hoặc ordered result |
+| Covering index access | Trả kết quả từ dữ liệu có trong index | Index chứa đủ cột query cần |
+| Index-to-table lookup | Dùng index định vị rồi đọc thêm row từ bảng | Kết quả ít và cần cột ngoài index |
 
-Ví dụ phổ biến:
+Table scan không mặc định là lỗi. Nếu query trả phần lớn bảng, đọc tuần tự có thể rẻ hơn rất nhiều lần lookup rời rạc.
+
+Tên plan node có thể khác nhau giữa các hệ quản trị. Khi đọc execution plan, cần nhận diện hành vi đọc thay vì đánh giá chỉ dựa trên tên node.
+
+## Khai báo index
+
+### Single-column index
+
+Single-column index dùng một cột làm key:
 
 ```sql
-CREATE CLUSTERED INDEX CX_Orders_Id ON Orders(Id);
+CREATE INDEX ix_orders_customer
+ON orders (khachHangId);
 ```
 
-Nếu primary key là `Id` tăng dần, clustered index trên `Id` thường hợp lý vì insert mới ít gây xáo trộn page.
+Index này cung cấp access path theo `khachHangId`. Nó không tự tối ưu query chỉ lọc theo `trangThai` hoặc `ngayDatHang`.
 
-### 5.2. Nonclustered Index
+### Unique index
 
-Nonclustered index là index phụ. Nó lưu key riêng và trỏ về dòng thật.
+Unique index vừa cung cấp access path vừa ngăn key trùng:
 
 ```sql
-CREATE INDEX IX_Orders_CustomerId ON Orders(CustomerId);
+CREATE UNIQUE INDEX ux_customers_email
+ON customers (email);
 ```
 
-Nếu query cần thêm cột không nằm trong index, database có thể phải lookup về clustered index hoặc heap để lấy thêm dữ liệu.
+Khai báo này bảo vệ invariant: hai customer không thể có cùng `email`. Khi uniqueness là quy tắc dữ liệu, nên thể hiện bằng constraint hoặc unique index thay vì chỉ kiểm tra ở application.
 
----
+### Composite index
 
-## 6. Primary Key, Unique Constraint và Index
-
-Primary key thường tự tạo index, nhưng không có nghĩa mọi query theo nghiệp vụ đều được tối ưu.
+Composite index dùng nhiều cột theo một thứ tự xác định:
 
 ```sql
-CREATE TABLE Users (
-  Id BIGINT PRIMARY KEY,
-  Email NVARCHAR(256) NOT NULL
-);
+CREATE INDEX ix_orders_customer_date
+ON orders (khachHangId, ngayDatHang DESC, id DESC);
 ```
 
-Query theo `Id` nhanh, nhưng query theo `Email` vẫn cần index riêng nếu thường xuyên dùng:
+Index key được sắp xếp theo `khachHangId` trước. Trong cùng một customer, key tiếp tục được sắp xếp theo `ngayDatHang` và `id` giảm dần.
+
+### Index cho expression
+
+Expression index lưu kết quả của một biểu thức thay vì giá trị cột gốc. Nó phù hợp khi query thường xuyên sử dụng cùng một phép biến đổi, chẳng hạn chuẩn hóa email bằng `lower(email)`.
 
 ```sql
-CREATE UNIQUE INDEX UX_Users_Email ON Users(Email);
+SELECT id, email
+FROM customers
+WHERE lower(email) = lower('Lan@example.com');
 ```
 
-Unique index vừa tăng tốc lookup vừa bảo vệ tính đúng đắn dữ liệu.
+Cú pháp khai báo expression index khác nhau giữa các hệ quản trị. Chỉ tạo loại index này khi expression ổn định và query thực tế sử dụng đúng biểu thức đã index.
 
----
+## Primary key, unique constraint và foreign key
 
-## 7. Selectivity: độ chọn lọc của index
+`PRIMARY KEY` và `UNIQUE` constraint thường được thực thi bằng unique index. Index phía sau constraint có hai trách nhiệm:
 
-Index hiệu quả khi điều kiện lọc loại bỏ được nhiều dòng.
+- Kiểm tra tính duy nhất khi ghi.
+- Cung cấp access path theo key.
 
-```text
-Selectivity cao: Email, PhoneNumber, OrderCode, InvoiceNo
-Selectivity thấp: Gender, IsActive, IsDeleted, Status chỉ có vài giá trị
-```
-
-Index đơn lẻ trên cột `IsDeleted` thường ít giá trị, hiếm khi có ích nếu bảng lớn và đa số dòng có cùng giá trị. Nhưng `IsDeleted` có thể hữu ích khi nằm trong composite index đúng ngữ cảnh:
+Foreign key mô tả quan hệ dữ liệu nhưng index trên cột tham chiếu cần được đánh giá theo access pattern:
 
 ```sql
-CREATE INDEX IX_Orders_Tenant_Status_Created
-ON Orders(TenantId, Status, CreatedAt);
+SELECT id, tongTien
+FROM orders
+WHERE khachHangId = 42;
 ```
 
----
+Nếu hệ thống thường lấy order theo customer, index trên `orders(khachHangId)` hỗ trợ truy vấn này. Việc hệ quản trị tự tạo index cho foreign key hay không là khác biệt triển khai; không nên giả định nếu chưa kiểm tra schema thực tế.
 
-## 8. Composite Index: index nhiều cột
+## Selectivity và cardinality
 
-Composite index là nơi nhiều developer middle bắt đầu khác biệt rõ với junior.
+**Cardinality** là số giá trị phân biệt trong một tập dữ liệu. **Selectivity** mô tả mức độ một predicate thu hẹp số row.
 
-```sql
-CREATE INDEX IX_Orders_Customer_CreatedAt
-ON Orders(CustomerId, CreatedAt);
-```
-
-Index này phù hợp với:
-
-```sql
-WHERE CustomerId = @customerId
-ORDER BY CreatedAt DESC
-```
-
-Nó cũng có thể hỗ trợ:
-
-```sql
-WHERE CustomerId = @customerId
-```
-
-Nhưng thường không hỗ trợ tốt nếu chỉ lọc:
-
-```sql
-WHERE CreatedAt >= @fromDate
-```
-
-Vì `CreatedAt` không phải cột đầu của index.
-
----
-
-## 9. Quy tắc Leftmost Prefix
-
-Với composite index `(A, B, C)`, database tận dụng tốt các prefix từ trái sang phải:
-
-| Điều kiện | Dùng index tốt không? |
+| Cột | Đặc điểm thường gặp |
 |---|---|
-| `WHERE A = ?` | Có |
-| `WHERE A = ? AND B = ?` | Có |
-| `WHERE A = ? AND B = ? AND C = ?` | Có |
-| `WHERE B = ?` | Thường không tốt |
-| `WHERE C = ?` | Thường không tốt |
-| `WHERE A = ? AND C = ?` | Dùng tốt phần `A`, phần `C` tùy optimizer |
+| `email`, `soHoaDon` | Nhiều giá trị phân biệt |
+| `khachHangId` | Có thể chọn một nhóm nhỏ row |
+| `trangThai`, `deletedAt` | Ít trạng thái hoặc phân bố lệch |
 
-Thứ tự cột trong composite index là quyết định thiết kế, không phải chuyện thẩm mỹ.
+Index trên cột có ít giá trị phân biệt không tự động vô ích. Giá trị hiếm như `trangThai = 'FAILED'` vẫn có thể rất chọn lọc nếu chỉ chiếm một phần nhỏ của bảng.
 
----
+Optimizer cần statistics để ước lượng số row của từng giá trị. Vì vậy, hiệu quả của index phụ thuộc vào phân bố thực tế chứ không chỉ kiểu dữ liệu hay số lượng giá trị có thể có.
 
-## 10. Thứ tự cột trong composite index
+## Leftmost prefix
 
-Một công thức thực dụng:
+Với B-tree composite index `(A, B, C)`, các access pattern bắt đầu từ `A` thường có lợi thế:
+
+| Predicate | Phần key xác định phạm vi scan |
+|---|---|
+| `A = value` | `A` |
+| `A = value AND B = value` | `A, B` |
+| `A = value AND B >= value` | `A, B` |
+| `B = value` | Thiếu leading key `A` |
+| `A = value AND C = value` | `A` thu hẹp phạm vi; `C` có thể được kiểm tra sau |
+
+Không nên suy ra rằng mọi cột có trong composite index đều được sử dụng như nhau. Vị trí của cột quyết định phần nào của cây có thể bị loại bỏ trước khi scan.
+
+## Thứ tự cột trong composite index
+
+Thứ tự key xuất phát từ query contract:
+
+1. Equality predicate ổn định.
+2. Range predicate hoặc ordering cần duy trì.
+3. Tie-breaker tạo thứ tự xác định.
+4. Các cột chỉ dùng để trả về được xem xét cho covering index.
+
+Đây là hướng phân tích, không phải công thức bất biến. Selectivity, nhiều query dùng chung index và execution plan thực tế có thể dẫn đến thứ tự khác.
+
+Giả sử query lọc theo customer và khoảng ngày:
+
+```sql
+SELECT id, ngayDatHang, tongTien
+FROM orders
+WHERE khachHangId = 42
+  AND ngayDatHang >= '2026-07-01'
+  AND ngayDatHang < '2026-08-01'
+ORDER BY ngayDatHang DESC, id DESC;
+```
+
+Index phù hợp với equality, range và ordering:
+
+```sql
+CREATE INDEX ix_orders_customer_date
+ON orders (khachHangId, ngayDatHang DESC, id DESC);
+```
+
+`khachHangId` xác định vùng key của customer. `ngayDatHang` giới hạn khoảng cần đọc và cung cấp ordering. `id` giữ kết quả ổn định khi nhiều order có cùng thời điểm.
+
+## Covering index
+
+Covering index chứa đủ dữ liệu query cần nên database không phải quay lại bảng để lấy thêm cột.
+
+Với query:
+
+```sql
+SELECT ngayDatHang, tongTien, trangThai
+FROM orders
+WHERE khachHangId = 42
+ORDER BY ngayDatHang DESC
+LIMIT 50;
+```
+
+Một index có `khachHangId`, `ngayDatHang`, `tongTien` và `trangThai` có thể bao phủ query. Tuy nhiên, cột dùng để tìm kiếm và cột chỉ dùng để trả về không có vai trò giống nhau.
+
+Một số hệ quản trị hỗ trợ khai báo non-key payload column; hệ khác yêu cầu cột bao phủ nằm trực tiếp trong index key. Cần dùng cú pháp riêng của engine khi triển khai, nhưng trade-off chung không thay đổi:
+
+- Ít table lookup hơn.
+- Index rộng hơn.
+- Tốn storage và buffer cache hơn.
+- Tăng chi phí ghi.
+
+Không nên cố bao phủ `SELECT *`. Covering index phù hợp với query quan trọng có output ổn định và giới hạn số cột.
+
+## Ứng dụng
+
+### Lịch sử đơn hàng
+
+API cần lấy 50 order gần nhất của một customer:
+
+```sql
+SELECT id,
+       ngayDatHang,
+       tongTien,
+       trangThai
+FROM orders
+WHERE khachHangId = 42
+ORDER BY ngayDatHang DESC, id DESC
+LIMIT 50;
+```
+
+Access pattern gồm equality trên `khachHangId`, ordering theo `ngayDatHang` và `id`, sau đó dừng ở 50 row.
+
+```sql
+CREATE INDEX ix_orders_customer_date
+ON orders (khachHangId, ngayDatHang DESC, id DESC);
+```
+
+Database có thể đi đến vùng key của customer, đọc theo đúng thứ tự cần trả và dừng sớm. Nếu execution plan cho thấy table lookup chiếm phần lớn chi phí, mới tiếp tục đánh giá covering index.
+
+### Order đang chờ xử lý
+
+Worker thường lấy một nhóm nhỏ order có trạng thái `PENDING`:
+
+```sql
+SELECT id, createdAt
+FROM orders
+WHERE trangThai = 'PENDING'
+ORDER BY createdAt, id
+LIMIT 100;
+```
+
+Index theo filter và ordering:
+
+```sql
+CREATE INDEX ix_orders_status_created
+ON orders (trangThai, createdAt, id);
+```
+
+Index này hiệu quả khi `PENDING` chỉ chiếm một phần nhỏ của bảng. Nếu phần lớn order đều `PENDING`, optimizer có thể chọn table scan vì index không thu hẹp đủ dữ liệu.
+
+### Keyset pagination
+
+`OFFSET` sâu vẫn buộc database đi qua những row đứng trước. Keyset pagination tiếp tục từ key cuối của trang hiện tại:
+
+```sql
+SELECT id, ngayDatHang, tongTien
+FROM orders
+WHERE khachHangId = 42
+  AND (
+    ngayDatHang < '2026-07-20 09:30:00'
+    OR (
+      ngayDatHang = '2026-07-20 09:30:00'
+      AND id < 9120
+    )
+  )
+ORDER BY ngayDatHang DESC, id DESC
+LIMIT 50;
+```
+
+Index `(khachHangId, ngayDatHang DESC, id DESC)` khớp với filter và ordering. Cursor phải chứa cả `ngayDatHang` lẫn `id`; nếu thiếu tie-breaker, row có cùng thời điểm có thể bị lặp hoặc bỏ qua.
+
+### Join theo foreign key
+
+Query lấy order trong khoảng ngày cùng tên customer:
+
+```sql
+SELECT o.id,
+       o.ngayDatHang,
+       c.ten
+FROM orders o
+JOIN customers c ON c.id = o.khachHangId
+WHERE o.ngayDatHang >= '2026-07-01'
+  AND o.ngayDatHang < '2026-08-01';
+```
+
+Primary key của `customers` hỗ trợ lookup theo `c.id`. Index cần thiết ở `orders` phụ thuộc hướng join và predicate. Nếu query bắt đầu từ khoảng ngày của order, index có leading key `ngayDatHang` có thể hữu ích hơn index chỉ có `khachHangId`.
+
+Không có một index chung cho mọi phép join. Cần xem bảng nào được lọc trước, số row sau filter và số lần relation còn lại bị lookup.
+
+## Predicate và khả năng sử dụng index
+
+Predicate có indexable form khi database có thể đối chiếu operator trực tiếp với key hoặc expression đã index.
+
+### Range thay cho function trên cột
+
+Predicate sau phải tính function cho từng row:
+
+```sql
+WHERE DATE(createdAt) = '2026-07-26'
+```
+
+Nếu có B-tree trên `createdAt`, biểu diễn cùng yêu cầu bằng range:
+
+```sql
+WHERE createdAt >= '2026-07-26 00:00:00'
+  AND createdAt <  '2026-07-27 00:00:00'
+```
+
+Range cung cấp điểm bắt đầu và kết thúc trực tiếp trong B-tree.
+
+### Prefix và contains search
+
+Prefix search có leading value:
+
+```sql
+WHERE ten LIKE 'nguyen%'
+```
+
+Contains search không có leading value để định vị trong B-tree:
+
+```sql
+WHERE ten LIKE '%nguyen%'
+```
+
+Nếu contains search là yêu cầu chính, cần chọn full-text, inverted index hoặc search engine phù hợp thay vì thêm một B-tree tương tự.
+
+### Kiểu dữ liệu của parameter
+
+Parameter nên có kiểu tương thích với cột. Cast không phù hợp trên cột có thể làm database không dùng được index condition như mong muốn hoặc làm cardinality estimate kém chính xác.
+
+Định nghĩa kiểu dữ liệu đúng ở application và prepared statement thường tốt hơn việc chèn cast tùy ý vào SQL.
+
+## Optimizer và statistics
+
+Optimizer ước lượng chi phí của các access path rồi chọn plan có estimated cost thấp nhất. Các yếu tố chính gồm:
+
+- Số row dự kiến sau predicate.
+- Số page của bảng và index phải đọc.
+- Chi phí đọc tuần tự và đọc ngẫu nhiên.
+- Khả năng dùng ordering sẵn có.
+- Statistics về phân bố và độ phổ biến của giá trị.
+
+Statistics sai có thể khiến index đúng cấu trúc nhưng plan không phù hợp. `EXPLAIN` cho biết plan được chọn:
+
+```sql
+EXPLAIN
+SELECT id, tongTien
+FROM orders
+WHERE khachHangId = 42
+ORDER BY ngayDatHang DESC, id DESC
+LIMIT 50;
+```
+
+Cú pháp lấy actual runtime và I/O metrics khác nhau giữa các hệ quản trị. Khi đọc kết quả, cần tập trung vào:
+
+- Access path được chọn.
+- Estimated rows so với actual rows.
+- Số lần node được thực hiện.
+- Số row bị loại sau khi đọc.
+- Lượng dữ liệu đọc từ index và bảng.
+- Sort còn tồn tại hay index đã cung cấp ordering.
+
+## Chi phí ghi và dung lượng
+
+Mỗi index thêm công việc cho workload ghi:
 
 ```text
-Equality columns -> Range columns -> Sort columns -> Include columns
+INSERT → thêm index entry
+UPDATE index key → cập nhật index entry
+DELETE → loại bỏ index entry theo cơ chế của storage engine
 ```
 
-Ví dụ:
+Index rộng chiếm nhiều storage và buffer cache hơn. Nhiều index gần giống nhau có thể cải thiện một số query đọc nhưng làm giảm throughput ghi của toàn bảng.
 
-```sql
-SELECT Id, TotalAmount, CreatedAt
-FROM Orders
-WHERE TenantId = @tenantId
-  AND CustomerId = @customerId
-  AND CreatedAt >= @fromDate
-  AND CreatedAt < @toDate
-ORDER BY CreatedAt DESC;
-```
+Khi đánh giá index mới, cần đo cả:
 
-Index hợp lý:
+- Latency và lượng dữ liệu đọc của query mục tiêu.
+- Latency `INSERT`, `UPDATE`, `DELETE`.
+- Kích thước index.
+- Tần suất sử dụng.
+- Ảnh hưởng đến cache.
 
-```sql
-CREATE INDEX IX_Orders_Tenant_Customer_Created
-ON Orders(TenantId, CustomerId, CreatedAt DESC)
-INCLUDE (TotalAmount);
-```
-
-Lý do:
-
-- `TenantId`, `CustomerId`: equality filter
-- `CreatedAt`: range và sort
-- `TotalAmount`: chỉ cần trả ra, không cần dùng để seek
-
----
-
-## 11. Covering Index và INCLUDE
-
-Covering index là index chứa đủ dữ liệu query cần, giúp database không phải lookup về bảng chính.
-
-```sql
-CREATE INDEX IX_Orders_Customer_Created
-ON Orders(CustomerId, CreatedAt DESC)
-INCLUDE (TotalAmount, Status);
-```
-
-Query:
-
-```sql
-SELECT CreatedAt, TotalAmount, Status
-FROM Orders
-WHERE CustomerId = @customerId
-ORDER BY CreatedAt DESC;
-```
-
-Nếu index đã có đủ `CreatedAt`, `TotalAmount`, `Status`, database có thể trả dữ liệu từ index.
-
-Trade-off:
-
-- Đọc nhanh hơn
-- Index lớn hơn
-- Ghi chậm hơn
-- Dễ tạo quá nhiều index gần giống nhau nếu không kiểm soát
-
----
-
-## 12. Filtered / Partial Index
-
-Filtered index chỉ index một phần dữ liệu.
-
-SQL Server:
-
-```sql
-CREATE INDEX IX_Orders_Active_Created
-ON Orders(CreatedAt)
-WHERE IsDeleted = 0;
-```
-
-PostgreSQL:
-
-```sql
-CREATE INDEX IX_Orders_Active_Created
-ON Orders(CreatedAt)
-WHERE IsDeleted = false;
-```
-
-Phù hợp khi query luôn lọc một nhóm nhỏ:
-
-- Dòng chưa xóa mềm
-- Đơn hàng đang mở
-- Job đang pending
-- Dữ liệu active trong khi dữ liệu archive rất lớn
-
-Filtered index rất mạnh nhưng phải chắc rằng query có điều kiện khớp filter, nếu không optimizer không dùng được.
-
----
-
-## 13. Index cho JOIN
-
-Join nhanh khi cột dùng để join có index hợp lý, đặc biệt ở bảng bị lookup nhiều lần.
-
-```sql
-SELECT o.Id, c.Name
-FROM Orders o
-JOIN Customers c ON c.Id = o.CustomerId
-WHERE o.CreatedAt >= @fromDate;
-```
-
-Thường cần:
-
-- `Customers.Id`: primary key, đã có index
-- `Orders.CreatedAt`: hỗ trợ filter theo thời gian
-- `Orders.CustomerId`: có thể cần nếu join theo hướng từ customer sang order
-
-Không có một index chung cho mọi hướng join. Phải xem query bắt đầu từ bảng nào, filter ở đâu, cardinality ra sao.
-
----
-
-## 14. Index cho ORDER BY
-
-Index có thể giúp tránh sort tốn tài nguyên.
-
-```sql
-SELECT TOP 50 Id, CreatedAt
-FROM Orders
-WHERE TenantId = @tenantId
-ORDER BY CreatedAt DESC;
-```
-
-Index:
-
-```sql
-CREATE INDEX IX_Orders_Tenant_Created
-ON Orders(TenantId, CreatedAt DESC);
-```
-
-Nếu filter và sort cùng nằm trong index đúng thứ tự, database có thể đọc sẵn theo thứ tự cần trả.
-
----
-
-## 15. Index cho phân trang
-
-Offset pagination dễ chậm khi page sâu.
-
-```sql
-SELECT Id, CreatedAt
-FROM Orders
-WHERE TenantId = @tenantId
-ORDER BY CreatedAt DESC
-OFFSET 100000 ROWS FETCH NEXT 50 ROWS ONLY;
-```
-
-Database vẫn phải đi qua nhiều dòng trước khi lấy 50 dòng tiếp theo.
-
-Với dữ liệu lớn, cân nhắc keyset pagination:
-
-```sql
-SELECT TOP 50 Id, CreatedAt
-FROM Orders
-WHERE TenantId = @tenantId
-  AND (CreatedAt < @lastCreatedAt OR (CreatedAt = @lastCreatedAt AND Id < @lastId))
-ORDER BY CreatedAt DESC, Id DESC;
-```
-
-Index:
-
-```sql
-CREATE INDEX IX_Orders_Tenant_Created_Id
-ON Orders(TenantId, CreatedAt DESC, Id DESC);
-```
-
-Keyset pagination thường ổn định hơn khi dữ liệu lớn và người dùng đi sâu qua nhiều trang.
-
----
-
-## 16. Những câu SQL làm index mất tác dụng
-
-### 16.1. Function bọc quanh cột
-
-```sql
-WHERE YEAR(CreatedAt) = 2026
-```
-
-Nên đổi thành range:
-
-```sql
-WHERE CreatedAt >= '2026-01-01'
-  AND CreatedAt < '2027-01-01'
-```
-
-### 16.2. Leading wildcard
-
-```sql
-WHERE Name LIKE '%an'
-```
-
-B-Tree index thường không seek tốt được vì phần đầu chuỗi bị bỏ qua.
-
-### 16.3. Ép kiểu ngầm
-
-```sql
-WHERE PhoneNumber = 84901234567
-```
-
-Nếu `PhoneNumber` là chuỗi, database có thể phải convert cột, làm index khó dùng. Nên truyền đúng kiểu:
-
-```sql
-WHERE PhoneNumber = '84901234567'
-```
-
-### 16.4. OR quá rộng
-
-```sql
-WHERE CustomerId = @id OR PhoneNumber = @phone
-```
-
-Có thể phải tách query, dùng `UNION ALL`, hoặc tạo index phù hợp cho từng nhánh tùy case.
-
----
-
-## 17. Execution Plan: đọc plan trước khi đoán
-
-Không nên thêm index chỉ vì "nghe có vẻ đúng". Hãy xem execution plan.
-
-Cần quan sát:
-
-- Query đang scan hay seek?
-- Estimated rows và actual rows lệch nhiều không?
-- Có key lookup lặp hàng nghìn/hàng triệu lần không?
-- Sort/hash/join nào tốn chi phí?
-- Missing index suggestion có hợp lý hay chỉ là gợi ý máy móc?
-- Query trả ít dòng hay nhiều dòng?
-- Predicate có SARGable không?
-
-SARGable nghĩa là điều kiện có thể tận dụng index seek hiệu quả.
-
-```text
-Tốt: WHERE CreatedAt >= @fromDate AND CreatedAt < @toDate
-Kém: WHERE CONVERT(date, CreatedAt) = @date
-```
-
----
-
-## 18. Statistics: vì sao có index vẫn chậm?
-
-Optimizer chọn plan dựa trên statistics. Nếu statistics cũ hoặc phân bố dữ liệu lệch, optimizer có thể ước lượng sai số dòng.
-
-Ví dụ:
-
-- Bảng có 100 triệu dòng
-- `Status = 'Pending'` chỉ có 1.000 dòng hôm qua
-- Hôm nay batch import làm `Pending` thành 20 triệu dòng
-- Statistics chưa cập nhật
-
-Optimizer vẫn tưởng `Pending` ít, chọn plan lookup nhiều lần, query chậm nặng.
-
-Vì vậy index tuning không chỉ là tạo index, mà còn gồm:
-
-- Cập nhật statistics
-- Theo dõi plan regression
-- Kiểm tra parameter sniffing
-- Rebuild/reorganize index khi fragmentation thật sự gây vấn đề
-
----
-
-## 19. Parameter Sniffing
-
-Parameter sniffing xảy ra khi database compile plan dựa trên giá trị parameter đầu tiên, rồi tái sử dụng plan đó cho giá trị khác có phân bố rất khác.
-
-Ví dụ:
-
-```sql
-WHERE TenantId = @tenantId
-```
-
-Tenant nhỏ có 1.000 đơn, tenant lớn có 50 triệu đơn. Một plan tối ưu cho tenant nhỏ có thể rất tệ cho tenant lớn.
-
-Hướng xử lý tùy database và mức độ vấn đề:
-
-- Tách query theo case dữ liệu lớn/nhỏ
-- Cập nhật statistics
-- Dùng recompile có kiểm soát
-- Tối ưu index theo pattern thật
-- Tránh fix mù bằng hint nếu chưa hiểu tác dụng phụ
-
----
-
-## 20. Index và write workload
-
-Mỗi index thêm vào làm tăng chi phí ghi.
-
-```text
-INSERT: phải thêm entry vào từng index
-UPDATE cột được index: phải cập nhật index
-DELETE: phải xóa entry khỏi index
-```
-
-Với bảng giao dịch ghi nhiều như log, audit, order item, stock transaction, việc tạo quá nhiều index sẽ làm hệ thống chậm ở luồng ghi.
-
-Nguyên tắc:
-
-- Index theo query quan trọng, không index theo cảm giác
-- Tránh index trùng hoặc gần trùng
-- Với bảng append-only lớn, ưu tiên index phục vụ truy vấn theo thời gian, tenant, shop, loại nghiệp vụ
-- Với báo cáo nặng, cân nhắc bảng tổng hợp/materialized view thay vì ép một bảng giao dịch phục vụ mọi kiểu report
-
----
-
-## 21. Index trùng và index dư thừa
+## Index trùng lặp
 
 Nếu đã có index:
 
 ```sql
-IX_Orders_Tenant_Customer_Created (TenantId, CustomerId, CreatedAt)
+CREATE INDEX ix_orders_customer_date
+ON orders (khachHangId, ngayDatHang);
 ```
 
-Thì index này có thể dư trong nhiều trường hợp:
+index chỉ chứa `khachHangId` có thể trùng chức năng cho một số query:
 
 ```sql
-IX_Orders_Tenant (TenantId)
+CREATE INDEX ix_orders_customer
+ON orders (khachHangId);
 ```
 
-Vì composite index có thể phục vụ prefix `TenantId`.
+Không xóa chỉ dựa trên leftmost prefix. Index ngắn hơn có thể nhỏ hơn đáng kể và phù hợp hơn cho query chỉ cần `khachHangId`. Cần kiểm tra kích thước, usage, execution plan và write overhead trước khi loại bỏ.
 
-Nhưng không phải lúc nào cũng xóa được index ngắn hơn. Index ngắn có thể nhỏ hơn nhiều và phù hợp hơn cho query chỉ cần `TenantId`. Cần xem usage, size, plan và workload thật.
+## Khác biệt cần tách theo hệ quản trị
 
----
+Các khái niệm B-tree, composite index, leftmost prefix, selectivity, covering và access path có thể dùng chung. Những phần sau cần đọc tài liệu riêng của engine trước khi áp dụng:
 
-## 22. Index cho soft delete, multi-tenant và phân quyền dữ liệu
+- Cú pháp expression index.
+- Cách khai báo cột chỉ dùng để bao phủ output.
+- Conditional hoặc filtered index.
+- Full-text, document, spatial và block-range index.
+- Index tự động tạo bởi foreign key.
+- Tên execution-plan node và cách lấy actual runtime/I/O.
+- Online hoặc concurrent index creation.
+- Cơ chế row locator, visibility và table lookup.
 
-Trong hệ thống nghiệp vụ, query thường có filter mặc định:
+Không nên đưa cú pháp của một engine vào bài nền tảng rồi xem đó là hành vi chung.
 
-```sql
-WHERE TenantId = @tenantId
-  AND IsDeleted = 0
-  AND ShopId = @shopId
-```
+## Quy trình thiết kế index
 
-Đừng quên các cột filter nền này khi thiết kế index. Một index chỉ theo `CreatedAt` có thể kém hiệu quả nếu mọi query thực tế đều lọc theo `TenantId`, `ShopId`, `IsDeleted`.
+Một đề xuất index cần bắt đầu từ query và workload:
 
-Ví dụ:
+1. Xác định row output, predicate, join, ordering và giới hạn số row.
+2. Đo số row của bảng, phân bố dữ liệu và tần suất query.
+3. Đọc execution plan hiện tại trên dữ liệu đại diện.
+4. Chọn index structure theo operator.
+5. Chọn key order theo equality, range, ordering và tie-breaker.
+6. Đánh giá covering chỉ khi table lookup là chi phí đáng kể.
+7. So sánh plan, runtime, lượng dữ liệu đọc và write latency trước và sau thay đổi.
+8. Kiểm tra index trùng lặp và kế hoạch rollback.
 
-```sql
-CREATE INDEX IX_Invoices_Tenant_Shop_Date
-ON Invoices(TenantId, ShopId, InvoiceDate DESC)
-WHERE IsDeleted = 0;
-```
+Không nên thêm index khi bảng nhỏ, query hiếm, query trả phần lớn bảng hoặc bottleneck nằm ngoài access path. Report quét và tổng hợp phần lớn dữ liệu có thể cần partition, bảng tổng hợp hoặc hệ thống phân tích riêng.
 
-Nếu database không hỗ trợ filtered index hoặc project chưa dùng, có thể đưa `IsDeleted` vào key, nhưng cần đánh giá selectivity.
+## Tổng kết
 
----
+Index cung cấp access path; optimizer quyết định có sử dụng access path đó hay không. B-tree phù hợp với equality, range và ordering. Composite index cần được thiết kế theo leading key, predicate và thứ tự kết quả.
 
-## 23. Index cho báo cáo
-
-Báo cáo thường lọc theo:
-
-- Khoảng ngày
-- Chi nhánh/cửa hàng
-- Tenant
-- Trạng thái
-- Loại nghiệp vụ
-
-Ví dụ:
-
-```sql
-SELECT ShopId, SUM(TotalAmount)
-FROM Invoices
-WHERE TenantId = @tenantId
-  AND InvoiceDate >= @fromDate
-  AND InvoiceDate < @toDate
-  AND Status = 'Paid'
-GROUP BY ShopId;
-```
-
-Index có thể bắt đầu bằng equality filter rồi đến date range:
-
-```sql
-CREATE INDEX IX_Invoices_Tenant_Status_Date_Shop
-ON Invoices(TenantId, Status, InvoiceDate, ShopId)
-INCLUDE (TotalAmount);
-```
-
-Nhưng nếu báo cáo tổng hợp quá lớn, index không đủ. Cần cân nhắc:
-
-- Bảng tổng hợp theo ngày/tháng
-- Batch job tính trước
-- Partition theo thời gian
-- Archive dữ liệu cũ
-- Read replica hoặc warehouse cho analytics
-
----
-
-## 24. Index không thay thế thiết kế dữ liệu
-
-Nếu query phải join 12 bảng lớn, filter mơ hồ, sort trên expression phức tạp, rồi export hàng triệu dòng, thêm index chỉ giảm đau một phần.
-
-Các hướng thiết kế cần nghĩ thêm:
-
-- Denormalize có kiểm soát cho màn hình đọc nhiều
-- Bảng read model riêng cho report/search
-- Tách dữ liệu nóng và dữ liệu lạnh
-- Partition theo thời gian hoặc tenant
-- Archive dữ liệu cũ
-- Full-text search hoặc search engine cho tìm kiếm text phức tạp
-
-Senior biết lúc nào nên tune index, lúc nào nên đổi shape dữ liệu.
-
----
-
-## 25. Checklist thiết kế index cho một query
-
-Khi gặp query chậm, đi theo thứ tự:
-
-1. Query này phục vụ màn hình/API/report nào?
-2. Bảng có bao nhiêu dòng, tăng bao nhiêu mỗi ngày?
-3. Query chạy bao nhiêu lần/phút?
-4. Query trả bao nhiêu dòng?
-5. Điều kiện `WHERE` là equality, range hay text search?
-6. Có `ORDER BY`, `GROUP BY`, `JOIN` nào quan trọng?
-7. Có filter nền như tenant, shop, soft delete, phân quyền không?
-8. Execution plan hiện tại đang scan, seek, lookup hay sort?
-9. Index hiện có có bị trùng hoặc sai thứ tự cột không?
-10. Index mới làm write workload chậm thêm bao nhiêu?
-11. Có cần covering index không, hay lookup ít dòng là đủ?
-12. Có cần filtered index, computed column, full-text, partition hoặc read model không?
-
----
-
-## 26. Checklist review index ở mức Middle/Senior
-
-Một proposal index tốt nên nói rõ:
-
-- Query hoặc nhóm query được tối ưu
-- Plan hiện tại và bottleneck
-- Index đề xuất
-- Vì sao chọn thứ tự cột như vậy
-- Có dùng `INCLUDE` không, vì sao
-- Tác động đến insert/update/delete
-- Dung lượng dự kiến hoặc ít nhất nhận định size
-- Index nào có thể trùng/dư
-- Cách kiểm chứng sau khi deploy
-- Cách rollback nếu write latency tăng
-
-Ví dụ proposal chưa đủ:
-
-```text
-Thêm index CustomerId cho nhanh.
-```
-
-Ví dụ proposal tốt hơn:
-
-```text
-API lịch sử đơn hàng theo khách đang scan Orders khi lọc CustomerId + CreatedAt.
-Đề xuất IX_Orders_Tenant_Customer_Created (TenantId, CustomerId, CreatedAt DESC)
-INCLUDE (Status, TotalAmount) để phục vụ filter + sort + list columns.
-Kiểm tra thêm write latency vì bảng Orders ghi cao vào giờ cao điểm.
-```
-
----
-
-## 27. Công thức nhớ nhanh
-
-```text
-Index tốt = khớp query thật + selectivity đủ tốt + thứ tự cột đúng + chi phí ghi chấp nhận được.
-```
-
-Một số quy tắc nhanh:
-
-- Query theo `WHERE` nào nhiều thì index theo pattern đó
-- Equality thường đứng trước range
-- Cột dùng sort có thể nằm sau filter để tránh sort
-- `SELECT *` làm covering index khó và dễ tốn lookup
-- Function trên cột thường làm index khó dùng
-- Index cột ít giá trị không tự động hữu ích
-- Composite index dùng tốt từ trái sang phải
-- Missing index suggestion chỉ là gợi ý, không phải mệnh lệnh
-- Mỗi index đều có hóa đơn phải trả ở write, storage và maintenance
-
----
-
-## 28. Ví dụ thực tế: màn hình danh sách hóa đơn
-
-Yêu cầu:
-
-- Lọc theo tenant
-- Lọc theo chi nhánh
-- Chỉ lấy hóa đơn chưa xóa
-- Lọc theo khoảng ngày
-- Sắp xếp mới nhất trước
-- Hiển thị mã hóa đơn, khách hàng, tổng tiền, trạng thái
-
-Query:
-
-```sql
-SELECT Id, InvoiceNo, CustomerId, TotalAmount, Status, InvoiceDate
-FROM Invoices
-WHERE TenantId = @tenantId
-  AND ShopId = @shopId
-  AND IsDeleted = 0
-  AND InvoiceDate >= @fromDate
-  AND InvoiceDate < @toDate
-ORDER BY InvoiceDate DESC, Id DESC
-OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY;
-```
-
-Index đề xuất:
-
-```sql
-CREATE INDEX IX_Invoices_Tenant_Shop_Date_Id
-ON Invoices(TenantId, ShopId, InvoiceDate DESC, Id DESC)
-INCLUDE (InvoiceNo, CustomerId, TotalAmount, Status)
-WHERE IsDeleted = 0;
-```
-
-Tư duy:
-
-- `TenantId`, `ShopId`: lọc nền, equality
-- `InvoiceDate`: range và sort
-- `Id`: tie-breaker để sort ổn định
-- `INCLUDE`: phục vụ list columns, giảm lookup
-- `WHERE IsDeleted = 0`: chỉ index dữ liệu active nếu DB hỗ trợ
-
-Nếu database không hỗ trợ filtered index, cân nhắc:
-
-```sql
-CREATE INDEX IX_Invoices_Tenant_Shop_IsDeleted_Date_Id
-ON Invoices(TenantId, ShopId, IsDeleted, InvoiceDate DESC, Id DESC)
-INCLUDE (InvoiceNo, CustomerId, TotalAmount, Status);
-```
-
----
-
-## 29. Khi nào không nên thêm index?
-
-Không nên thêm index khi:
-
-- Query hiếm khi chạy
-- Bảng nhỏ, scan rẻ hơn maintenance index
-- Query trả phần lớn bảng
-- Cột có selectivity quá thấp và không kết hợp với filter khác
-- Đã có index tương đương
-- Bottleneck thật nằm ở network, lock, N+1 query, render UI, hoặc service khác
-- Report cần kiến trúc đọc riêng chứ không phải thêm index vào bảng giao dịch
-
-Index là thuốc đúng bệnh, không phải vitamin uống hằng ngày.
-
----
-
-## 30. Tư duy chốt
-
-Junior thường nhìn index như cú pháp:
-
-```sql
-CREATE INDEX ...
-```
-
-Middle bắt đầu nhìn index theo query pattern:
-
-```text
-WHERE gì, JOIN gì, ORDER BY gì, trả bao nhiêu dòng?
-```
-
-Senior nhìn index như một quyết định vận hành:
-
-```text
-Plan hiện tại ra sao?
-Workload đọc/ghi thế nào?
-Data phân bố lệch không?
-Statistics có đúng không?
-Index có trùng không?
-Deploy xong đo bằng gì?
-Nếu dữ liệu tăng 10 lần thì còn ổn không?
-```
-
-**Kết luận**: Index tốt không phải index nhiều. Index tốt là index phục vụ đúng truy vấn quan trọng, giữ được tính đúng đắn, giảm được chi phí đọc rõ ràng, và không làm hệ thống trả giá quá đắt ở ghi, dung lượng và vận hành.
+Thiết kế index bắt đầu từ query contract và workload. Cấu trúc đúng phải giảm lượng dữ liệu được đọc, giữ chi phí ghi ở mức chấp nhận được và được kiểm chứng bằng execution plan cùng số liệu thực tế.

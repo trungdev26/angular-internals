@@ -1,0 +1,788 @@
+<section class="lp" aria-labelledby="lp-title">
+  <header class="lp__header">
+    <p class="lp__eyebrow">Minh họa tương tác</p>
+    <h2 id="lp-title">Load Parameter &amp; Capacity</h2>
+    <p class="lp__desc">
+      Bắt đầu từ tải thực tế hoặc một kịch bản nghiệp vụ. Công cụ quy đổi sang peak RPS, áp headroom và kiểm tra hạ tầng.
+    </p>
+  </header>
+
+  <div class="lp__presets" role="group" aria-label="Kịch bản mẫu">
+    <button
+      type="button"
+      class="preset"
+      *ngFor="let preset of presets; trackBy: trackByIndex"
+      [class.preset--active]="activePresetId === preset.id"
+      (click)="applyPreset(preset)"
+    >
+      <strong>{{ preset.label }}</strong>
+      <span>{{ preset.subtitle }}</span>
+    </button>
+  </div>
+
+  <div
+    class="statusbar"
+    [class.statusbar--ok]="verdictStatus === 'ok'"
+    [class.statusbar--warn]="verdictStatus === 'warn'"
+    [class.statusbar--crit]="verdictStatus === 'crit'"
+  >
+    <div class="statusbar__verdict">
+      <span class="statusbar__pill">
+        {{ verdictStatus === 'ok' ? 'ĐẠT' : verdictStatus === 'warn' ? 'CẦN CHÚ Ý' : 'KHÔNG ĐÁP ỨNG' }}
+      </span>
+      <span class="statusbar__note" *ngIf="verdictStatus !== 'ok'">{{ critCount }} nghiêm trọng · {{ warnCount }} cảnh báo</span>
+      <span class="statusbar__note" *ngIf="verdictStatus === 'ok'">Trong vùng an toàn</span>
+    </div>
+
+    <div class="statusbar__kpis">
+      <div class="mini-kpi">
+        <span>Peak RPS</span>
+        <strong>{{ peakRps | number: '1.0-3' }}</strong>
+        <small>design {{ designPeakRps | number: '1.0-3' }}</small>
+      </div>
+      <div class="mini-kpi">
+        <span>DB QPS sau cache</span>
+        <strong>{{ dbQueryQpsAfterCache | number: '1.0-3' }}</strong>
+        <small>{{ dbUtilizationPercent | number: '1.0-0' }}% capacity</small>
+      </div>
+      <div class="mini-kpi">
+        <span>Instance cần / có</span>
+        <strong>{{ minInstancesNeeded }} / {{ appInstanceCount }}</strong>
+        <small>fleet {{ fleetCapacityRps | number: '1.0-0' }} RPS</small>
+      </div>
+      <div class="mini-kpi">
+        <span>Storage / window</span>
+        <strong>{{ storagePerWindowGB | number: '1.0-2' }}</strong>
+        <small>GB dữ liệu ghi</small>
+      </div>
+    </div>
+  </div>
+
+  <section
+    class="decision-brief"
+    [class.decision-brief--warn]="verdictStatus === 'warn'"
+    [class.decision-brief--crit]="verdictStatus === 'crit'"
+    aria-labelledby="decision-title"
+    aria-live="polite"
+  >
+    <div class="decision-brief__verdict">
+      <span>Quyết định hiện tại</span>
+      <strong id="decision-title">{{ decisionTitle }}</strong>
+      <p>{{ decisionDetail }}</p>
+    </div>
+    <div class="decision-brief__item">
+      <span>Điểm cần chứng minh</span>
+      <strong>{{ primaryRisk }}</strong>
+      <small>Đừng scale theo một giả định chưa benchmark.</small>
+    </div>
+    <div class="decision-brief__item">
+      <span>Hành động ưu tiên</span>
+      <strong>{{ nextDecisionAction }}</strong>
+      <small>Ưu tiên giảm uncertainty trước khi thêm hạ tầng.</small>
+    </div>
+  </section>
+
+  <section class="card lp__panel" aria-label="Thông số đầu vào">
+    <div class="tabs" role="tablist" aria-label="Các bước nhập liệu">
+      <button
+        type="button"
+        role="tab"
+        [attr.aria-selected]="activeInputTab === 'load'"
+        [class.tabs__btn--active]="activeInputTab === 'load'"
+        (click)="setInputTab('load')"
+      >
+        <b>1</b> Tải &amp; peak
+      </button>
+      <button
+        type="button"
+        role="tab"
+        [attr.aria-selected]="activeInputTab === 'backend'"
+        [class.tabs__btn--active]="activeInputTab === 'backend'"
+        (click)="setInputTab('backend')"
+      >
+        <b>2</b> Backend cost
+      </button>
+      <button
+        type="button"
+        role="tab"
+        [attr.aria-selected]="activeInputTab === 'infra'"
+        [class.tabs__btn--active]="activeInputTab === 'infra'"
+        (click)="setInputTab('infra')"
+      >
+        <b>3</b> Hạ tầng
+      </button>
+      <button
+        type="button"
+        role="tab"
+        [attr.aria-selected]="activeInputTab === 'whatif'"
+        [class.tabs__btn--active]="activeInputTab === 'whatif'"
+        (click)="setInputTab('whatif')"
+      >
+        <b>4</b> What-if &amp; auto sizing
+      </button>
+    </div>
+
+    <div class="tab-body" *ngIf="activeInputTab === 'load'">
+      <div class="load-mode" role="group" aria-label="Cách nhập tải">
+        <button type="button" [class.load-mode__button--active]="loadInputMode === 'rps'" (click)="switchLoadInputMode('rps')">
+          Đã có số đo RPS
+        </button>
+        <button
+          type="button"
+          [class.load-mode__button--active]="loadInputMode === 'scenario'"
+          (click)="switchLoadInputMode('scenario')"
+        >
+          Theo kịch bản nghiệp vụ
+        </button>
+      </div>
+
+      <ng-container *ngIf="loadInputMode === 'rps'">
+        <div class="control-grid">
+          <label class="control-field" for="lp-direct-avg-rps">
+            <span>Average RPS</span>
+            <div class="input-row">
+              <input
+                id="lp-direct-avg-rps"
+                type="range"
+                min="0"
+                max="5000"
+                step="0.001"
+                [(ngModel)]="directAvgRps"
+                (ngModelChange)="onRpsInputsChanged()"
+              />
+              <input type="number" min="0" step="0.001" [(ngModel)]="directAvgRps" (ngModelChange)="onRpsInputsChanged()" />
+            </div>
+          </label>
+
+          <label class="control-field" for="lp-direct-peak-rps">
+            <span>Peak RPS / QPS</span>
+            <div class="input-row">
+              <input
+                id="lp-direct-peak-rps"
+                type="range"
+                min="0"
+                max="20000"
+                step="0.001"
+                [(ngModel)]="directPeakRps"
+                (ngModelChange)="onRpsInputsChanged()"
+              />
+              <input type="number" min="0" step="0.001" [(ngModel)]="directPeakRps" (ngModelChange)="onRpsInputsChanged()" />
+            </div>
+          </label>
+
+          <label class="control-field" for="lp-rps-window-hours">
+            <span>Khung mô phỏng (giờ)</span>
+            <div class="input-row">
+              <input
+                id="lp-rps-window-hours"
+                type="range"
+                min="1"
+                max="24"
+                step="1"
+                [(ngModel)]="trafficWindowHours"
+                (ngModelChange)="onRpsInputsChanged()"
+              />
+              <input type="number" min="1" [(ngModel)]="trafficWindowHours" (ngModelChange)="onRpsInputsChanged()" />
+            </div>
+          </label>
+        </div>
+
+        <div class="stat-strip">
+          <div class="stat">
+            <span>Request trong window</span>
+            <strong>{{ effectiveRequestsPerDay | number: '1.0-0' }}</strong>
+            <small>{{ avgRps | number: '1.0-3' }} RPS × {{ trafficWindowHours }}h</small>
+          </div>
+        </div>
+      </ng-container>
+
+      <ng-container *ngIf="loadInputMode === 'scenario'">
+        <div class="control-grid">
+          <label class="control-field" for="lp-clients">
+            <span>Số lượt nghiệp vụ</span>
+            <div class="input-row">
+              <input
+                id="lp-clients"
+                type="range"
+                min="1"
+                max="1000000"
+                step="1"
+                [(ngModel)]="expectedClients"
+                (ngModelChange)="onTrafficModelChanged()"
+              />
+              <input type="number" min="0" [(ngModel)]="expectedClients" (ngModelChange)="onTrafficModelChanged()" />
+            </div>
+          </label>
+
+          <label class="control-field" for="lp-req-client">
+            <span>API call / lượt</span>
+            <div class="input-row">
+              <input
+                id="lp-req-client"
+                type="range"
+                min="1"
+                max="100"
+                step="1"
+                [(ngModel)]="avgRequestsPerClientPerDay"
+                (ngModelChange)="onTrafficModelChanged()"
+              />
+              <input type="number" min="0" [(ngModel)]="avgRequestsPerClientPerDay" (ngModelChange)="onTrafficModelChanged()" />
+            </div>
+          </label>
+
+          <div class="control-field control-field--inline">
+            <span>Gợi ý nhanh</span>
+            <div class="quick-row">
+              <button type="button" (click)="applyClientIntensity(1)">1 call/lượt</button>
+              <button type="button" (click)="applyClientIntensity(3)">3 call/lượt</button>
+              <button type="button" (click)="applyClientIntensity(10)">10 call/lượt</button>
+            </div>
+          </div>
+        </div>
+
+      </ng-container>
+
+      <div class="control-grid">
+        <label class="control-field" for="lp-window-hours" *ngIf="loadInputMode === 'scenario'">
+          <span>Thời gian diễn ra (giờ)</span>
+          <div class="input-row">
+            <input
+              id="lp-window-hours"
+              type="range"
+              min="1"
+              max="24"
+              step="1"
+              [(ngModel)]="trafficWindowHours"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="trafficWindowHours" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-peak-pct" *ngIf="loadInputMode === 'scenario'">
+          <span>% lượt dồn vào peak</span>
+          <div class="input-row">
+            <input
+              id="lp-peak-pct"
+              type="range"
+              min="10"
+              max="100"
+              step="1"
+              [(ngModel)]="peakTrafficPercent"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="0" max="100" [(ngModel)]="peakTrafficPercent" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-peak-minutes" *ngIf="loadInputMode === 'scenario'">
+          <span>Peak window (phút)</span>
+          <div class="input-row">
+            <input
+              id="lp-peak-minutes"
+              type="range"
+              min="1"
+              [max]="trafficWindowHours * 60"
+              step="1"
+              [(ngModel)]="peakWindowMinutes"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="peakWindowMinutes" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-size">
+          <span>Kích thước request (KB)</span>
+          <div class="input-row">
+            <input
+              id="lp-size"
+              type="range"
+              min="1"
+              max="5000"
+              step="10"
+              [(ngModel)]="avgRequestSizeKB"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="avgRequestSizeKB" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-write">
+          <span>Tỉ lệ write (%)</span>
+          <div class="input-row">
+            <input
+              id="lp-write"
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+              [(ngModel)]="writePercent"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="0" max="100" [(ngModel)]="writePercent" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+      </div>
+
+      <div class="stat-strip" *ngIf="loadInputMode === 'scenario'">
+        <div class="stat">
+          <span>Request trong window</span>
+          <strong>{{ modeledRequestsPerDay | number: '1.0-0' }}</strong>
+          <small>{{ expectedClients | number: '1.0-0' }} lượt × {{ avgRequestsPerClientPerDay | number: '1.0-0' }} call</small>
+        </div>
+        <div class="stat">
+          <span>RPS bình quân</span>
+          <strong>{{ avgRps | number: '1.0-3' }}</strong>
+          <small>hệ thống tự tính trong {{ trafficWindowHours }}h</small>
+        </div>
+        <div class="stat">
+          <span>Peak RPS</span>
+          <strong>{{ peakRps | number: '1.0-3' }}</strong>
+          <small>hệ thống tự tính từ {{ peakTrafficPercent }}% / {{ peakWindowMinutes }} phút</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-body" *ngIf="activeInputTab === 'backend'">
+      <div class="control-grid">
+        <label class="control-field" for="lp-queries">
+          <span>Query DB / request</span>
+          <div class="input-row">
+            <input
+              id="lp-queries"
+              type="range"
+              min="1"
+              max="20"
+              step="1"
+              [(ngModel)]="queriesPerRequest"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="0" [(ngModel)]="queriesPerRequest" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-rows">
+          <span>Rows scan / query</span>
+          <div class="input-row">
+            <input
+              id="lp-rows"
+              type="range"
+              min="0"
+              max="100000"
+              step="100"
+              [(ngModel)]="avgRowsScannedPerQuery"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="0" [(ngModel)]="avgRowsScannedPerQuery" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-cache">
+          <span>Cache hit ratio (%)</span>
+          <div class="input-row">
+            <input
+              id="lp-cache"
+              type="range"
+              min="0"
+              max="99"
+              step="1"
+              [(ngModel)]="cacheHitRatioPercent"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="0" max="99" [(ngModel)]="cacheHitRatioPercent" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-cache-ttl" *ngIf="cacheHitRatioPercent > 0">
+          <span>Cache TTL (giây)</span>
+          <div class="input-row">
+            <input
+              id="lp-cache-ttl"
+              type="range"
+              min="1"
+              max="3600"
+              step="1"
+              [(ngModel)]="cacheTtlSeconds"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="cacheTtlSeconds" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-latency">
+          <span>p95 latency mục tiêu (ms)</span>
+          <div class="input-row">
+            <input
+              id="lp-latency"
+              type="range"
+              min="10"
+              max="5000"
+              step="10"
+              [(ngModel)]="p95LatencyMs"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="p95LatencyMs" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-margin">
+          <span>Headroom (%)</span>
+          <div class="input-row">
+            <input
+              id="lp-margin"
+              type="range"
+              min="0"
+              max="200"
+              step="5"
+              [(ngModel)]="safetyMarginPercent"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="0" [(ngModel)]="safetyMarginPercent" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div class="tab-body" *ngIf="activeInputTab === 'infra'">
+      <div class="need-strip" aria-label="Nhu cầu tự tính">
+        <div class="need">
+          <span>Instance tối thiểu</span>
+          <strong>{{ minInstancesNeeded }}</strong>
+        </div>
+        <div class="need">
+          <span>App CPU cần</span>
+          <strong>{{ requiredAppCores | number: '1.0-1' }} <small>core</small></strong>
+        </div>
+        <div class="need">
+          <span>App RAM cần</span>
+          <strong>{{ requiredRamGbTotal | number: '1.0-1' }} <small>GB</small></strong>
+        </div>
+        <div class="need">
+          <span>DB QPS thiết kế</span>
+          <strong>{{ designDbQps | number: '1.0-1' }} <small>q/s</small></strong>
+        </div>
+        <div class="need">
+          <span>DB connection cần</span>
+          <strong>{{ requiredDbConnections }} <small>~{{ poolPerInstance }}/inst</small></strong>
+        </div>
+        <div class="need" *ngIf="cacheHitRatioPercent > 0">
+          <span>Redis RAM cần</span>
+          <strong>{{ designCacheMemoryGb | number: '1.0-2' }} <small>GB</small></strong>
+        </div>
+      </div>
+
+      <div class="control-grid">
+        <label class="control-field" for="lp-app-count">
+          <span>App instances</span>
+          <div class="input-row">
+            <input
+              id="lp-app-count"
+              type="range"
+              min="1"
+              max="50"
+              step="1"
+              [(ngModel)]="appInstanceCount"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="appInstanceCount" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-app-cpu">
+          <span>CPU / instance</span>
+          <div class="input-row">
+            <input
+              id="lp-app-cpu"
+              type="range"
+              min="1"
+              max="32"
+              step="1"
+              [(ngModel)]="appCpuCoresPerInstance"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="appCpuCoresPerInstance" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-app-ram">
+          <span>RAM / instance (GB)</span>
+          <div class="input-row">
+            <input
+              id="lp-app-ram"
+              type="range"
+              min="1"
+              max="64"
+              step="1"
+              [(ngModel)]="appRamGbPerInstance"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="appRamGbPerInstance" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-db-cpu">
+          <span>DB CPU</span>
+          <div class="input-row">
+            <input id="lp-db-cpu" type="range" min="1" max="64" step="1" [(ngModel)]="dbCpuCores" (ngModelChange)="onInputsChanged()" />
+            <input type="number" min="1" [(ngModel)]="dbCpuCores" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-db-ram">
+          <span>DB RAM (GB)</span>
+          <div class="input-row">
+            <input id="lp-db-ram" type="range" min="1" max="256" step="1" [(ngModel)]="dbRamGb" (ngModelChange)="onInputsChanged()" />
+            <input type="number" min="1" [(ngModel)]="dbRamGb" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-db-maxconn">
+          <span>DB max connections</span>
+          <div class="input-row">
+            <input
+              id="lp-db-maxconn"
+              type="range"
+              min="10"
+              max="2000"
+              step="10"
+              [(ngModel)]="dbMaxConnections"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="dbMaxConnections" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+
+        <label class="control-field" for="lp-redis-mem" *ngIf="cacheHitRatioPercent > 0">
+          <span>Redis max memory (GB)</span>
+          <div class="input-row">
+            <input
+              id="lp-redis-mem"
+              type="range"
+              min="1"
+              max="128"
+              step="1"
+              [(ngModel)]="redisMaxMemoryGb"
+              (ngModelChange)="onInputsChanged()"
+            />
+            <input type="number" min="1" [(ngModel)]="redisMaxMemoryGb" (ngModelChange)="onInputsChanged()" />
+          </div>
+        </label>
+      </div>
+
+      <details class="advanced">
+        <summary>Giả định benchmark nâng cao</summary>
+        <div class="control-grid">
+          <label class="control-field" for="lp-rps-core">
+            <span>RPS / CPU core</span>
+            <div class="input-row">
+              <input
+                id="lp-rps-core"
+                type="range"
+                min="10"
+                max="1000"
+                step="10"
+                [(ngModel)]="rpsPerCpuCore"
+                (ngModelChange)="onInputsChanged()"
+              />
+              <input type="number" min="1" [(ngModel)]="rpsPerCpuCore" (ngModelChange)="onInputsChanged()" />
+            </div>
+          </label>
+
+          <label class="control-field" for="lp-mem-req">
+            <span>RAM / request (MB)</span>
+            <div class="input-row">
+              <input
+                id="lp-mem-req"
+                type="range"
+                min="1"
+                max="200"
+                step="1"
+                [(ngModel)]="avgMemPerRequestMb"
+                (ngModelChange)="onInputsChanged()"
+              />
+              <input type="number" min="1" [(ngModel)]="avgMemPerRequestMb" (ngModelChange)="onInputsChanged()" />
+            </div>
+          </label>
+
+          <label class="control-field" for="lp-db-qpc">
+            <span>Query/s / DB core</span>
+            <div class="input-row">
+              <input
+                id="lp-db-qpc"
+                type="range"
+                min="100"
+                max="10000"
+                step="100"
+                [(ngModel)]="queriesPerSecondPerDbCore"
+                (ngModelChange)="onInputsChanged()"
+              />
+              <input type="number" min="1" [(ngModel)]="queriesPerSecondPerDbCore" (ngModelChange)="onInputsChanged()" />
+            </div>
+          </label>
+        </div>
+      </details>
+    </div>
+
+    <div class="tab-body" *ngIf="activeInputTab === 'whatif'">
+      <div class="profiles" role="group" aria-label="Profile hạ tầng">
+        <button
+          type="button"
+          class="profile"
+          *ngFor="let profile of instanceProfiles; trackBy: trackByIndex"
+          [class.profile--active]="activeProfileId === profile.id"
+          (click)="applyInstanceProfile(profile)"
+        >
+          <strong>{{ profile.label }}</strong>
+          <span>{{ profile.subtitle }}</span>
+          <small>{{ profile.rpsPerCore }} RPS/core</small>
+        </button>
+      </div>
+
+      <div class="actions" role="group" aria-label="Tự động đề xuất">
+        <button type="button" class="actions__primary" (click)="applyRecommendedInfrastructure()">Auto-fit hạ tầng</button>
+        <button type="button" (click)="applyWhatIf('cache')">What-if cache 70%</button>
+        <button type="button" (click)="applyWhatIf('index')">Giảm rows scan 10x</button>
+        <button type="button" (click)="applyWhatIf('latency')">p95 về 120ms</button>
+        <button type="button" (click)="applyWhatIf('headroom')">Fit 50% headroom</button>
+      </div>
+      <p class="actions__feedback" *ngIf="lastWhatIfLabel">{{ lastWhatIfLabel }}</p>
+    </div>
+
+    <footer class="step-navigation" aria-label="Điều hướng các bước phân tích">
+      <span>Bước {{ activeInputStep }} / {{ inputTabOrder.length }}</span>
+      <div>
+        <button type="button" [disabled]="activeInputStep === 1" (click)="moveInputStep(-1)">Quay lại</button>
+        <button
+          type="button"
+          class="step-navigation__next"
+          [disabled]="activeInputStep === inputTabOrder.length"
+          (click)="moveInputStep(1)"
+        >
+          Tiếp tục
+        </button>
+      </div>
+    </footer>
+  </section>
+
+  <div class="card card--issues" *ngIf="verdictIssues.length">
+    <h3>Vấn đề phát hiện</h3>
+    <ul class="issues">
+      <li
+        *ngFor="let issue of verdictIssues; trackBy: trackByIndex"
+        [class.issues__item--crit]="issue.type === 'crit'"
+        [class.issues__item--warn]="issue.type === 'warn'"
+      >
+        {{ issue.text }}
+      </li>
+    </ul>
+  </div>
+
+  <div class="results-duo">
+    <div class="card">
+      <h3>Resource fit</h3>
+      <div class="util" *ngFor="let row of utilization; trackBy: trackByIndex">
+        <div class="util__head">
+          <strong>{{ row.label }}</strong>
+          <span
+            class="util__pct"
+            [class.util__pct--ok]="row.status === 'ok'"
+            [class.util__pct--warn]="row.status === 'warn'"
+            [class.util__pct--crit]="row.status === 'crit'"
+          >
+            {{ row.pct | number: '1.0-0' }}%
+          </span>
+        </div>
+        <div class="util__track">
+          <div
+            class="util__fill"
+            [class.util__fill--ok]="row.status === 'ok'"
+            [class.util__fill--warn]="row.status === 'warn'"
+            [class.util__fill--crit]="row.status === 'crit'"
+            [style.width.%]="row.pct > 100 ? 100 : row.pct"
+          ></div>
+        </div>
+        <p class="util__meta">
+          {{ row.required | number: '1.0-1' }} / {{ row.provisioned | number: '1.0-1' }} {{ row.unit }} — {{ row.hint }}
+        </p>
+      </div>
+
+      <p class="legend">
+        <span class="legend__dot legend__dot--ok"></span>&lt;70% an toàn
+        <span class="legend__dot legend__dot--warn"></span>70–100% theo dõi
+        <span class="legend__dot legend__dot--crit"></span>&gt;100% thiếu
+      </p>
+
+      <div class="signals" aria-label="Bottleneck detector">
+        <span
+          class="signal"
+          *ngFor="let item of bottlenecks; trackBy: trackByIndex"
+          [class.signal--warn]="item.status === 'warn'"
+          [class.signal--crit]="item.status === 'crit'"
+          [title]="item.detail"
+        >
+          {{ item.label }}
+        </span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>RPS trong model window vs capacity</h3>
+      <div class="chart-wrap">
+        <canvas #chartCanvas></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Design options</h3>
+    <div class="options-grid">
+      <div class="option" *ngFor="let option of designOptions; trackBy: trackByIndex">
+        <span
+          class="option__priority"
+          [class.option__priority--high]="option.priority === 'high'"
+          [class.option__priority--medium]="option.priority === 'medium'"
+        >
+          {{ option.priority }}
+        </span>
+        <strong>{{ option.title }}</strong>
+        <p>{{ option.impact }}</p>
+        <small>{{ option.tradeoff }}</small>
+      </div>
+    </div>
+  </div>
+
+  <details class="card card--fold">
+    <summary>Gợi ý kiến trúc ({{ recommendations.length }})</summary>
+    <ul class="recs">
+      <li *ngFor="let item of recommendations; trackBy: trackByIndex" [class.recs__item--warn]="item.type === 'warn'">
+        {{ item.text }}
+      </li>
+    </ul>
+  </details>
+
+  <details class="card card--fold">
+    <summary>Công thức tính — số thật</summary>
+    <div class="formulas">
+      <div class="formula" *ngFor="let step of derivation; trackBy: trackByIndex">
+        <span>{{ step.label }}</span>
+        <code>{{ step.formula }}</code>
+        <strong>{{ step.result }}</strong>
+      </div>
+    </div>
+  </details>
+
+  <details class="card card--fold">
+    <summary>Design note — copy vào tài liệu thiết kế</summary>
+    <textarea class="design-note" readonly [value]="designSummary" aria-label="Design summary"></textarea>
+  </details>
+
+  <section class="card lp__glossary" aria-label="Khái niệm nhanh">
+    <h3>Khái niệm nhanh</h3>
+    <div class="glossary-grid">
+      <details class="glossary-item" *ngFor="let item of glossary; trackBy: trackByIndex">
+        <summary>{{ item.term }}</summary>
+        <p>{{ item.definition }}</p>
+      </details>
+    </div>
+  </section>
+</section>

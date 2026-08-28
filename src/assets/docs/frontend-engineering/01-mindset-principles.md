@@ -1,4 +1,4 @@
-# 01. Mindset và nguyên tắc viết code FE
+# Mindset và nguyên tắc viết code FE
 
 Mục tiêu của phần này là tạo một hệ quy chiếu trước khi nói về component, service, state hay pattern. Nếu thiếu hệ quy chiếu, mình rất dễ viết code theo cảm giác: hôm nay thích tách nhỏ, mai lại nhét hết vào component; hôm nay dùng facade, mai bỏ qua; gặp bug thì thêm flag.
 

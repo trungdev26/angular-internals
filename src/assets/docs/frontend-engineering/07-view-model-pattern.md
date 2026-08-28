@@ -1,4 +1,4 @@
-# 07. ViewModel Pattern và vm$
+# ViewModel Pattern và vm$
 
 `vm$` là một pattern rất hay dùng trong Angular production. Nó giúp gom toàn bộ dữ liệu mà template cần vào một stream duy nhất, thay vì để template tự ghép nhiều observable, nhiều flag, nhiều permission và nhiều derived state rải rác.
 

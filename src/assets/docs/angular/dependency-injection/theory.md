@@ -1,33 +1,145 @@
 # Angular Dependency Injection
 
-> Tài liệu này tổng hợp kiến thức và tư duy thiết kế khi sử dụng Dependency Injection trong Angular. Nội dung được sắp xếp từ nền tảng đến nâng cao, phục vụ cho việc học, thiết kế service, review code và xử lý các lỗi liên quan đến provider scope, nhiều instance service, state không đồng bộ hoặc lifecycle không đúng.
+> Dependency Injection trong Angular không chỉ là cách inject một service vào component.
+> Nó là cơ chế để Angular quản lý **cách tạo object**, **vị trí đăng ký dependency**, **số lượng instance**, **vòng đời của state/resource**, và **khả năng thay thế implementation** khi ứng dụng phát triển.
 
----
-
-## Mục tiêu tài liệu
-
-Sau khi đọc xong, người đọc cần trả lời được các câu hỏi sau:
+Tài liệu này đi theo một luồng thống nhất:
 
 ```text
-1. Dependency Injection là gì và vì sao Angular cần DI?
-2. @Injectable() dùng để làm gì?
-3. Provider, Injector, Token khác nhau như thế nào?
-4. providedIn: 'root' có thật sự chỉ là singleton không?
-5. Vì sao một service có thể bị tạo nhiều instance?
-6. Khi nào nên provide service ở root, route/feature hoặc component?
-7. DI liên quan gì đến state, lifecycle, memory leak và testability?
-8. Khi review Angular DI cần nhìn những điểm nào?
+Vì sao cần DI
+→ Angular cần những metadata nào
+→ Token, Provider và Injector phối hợp ra sao
+→ Provider được đăng ký ở đâu
+→ Scope quyết định lifecycle như thế nào
+→ Cách inject dependency
+→ Cách thiết kế service và state
+→ Các case study thực tế
+→ Cách chẩn đoán và review lỗi DI
+```
+
+Các khái niệm trong tài liệu được áp dụng vào một bài toán chung: xây dựng feature `patient-queue` — màn hình hàng chờ khám bệnh.
+
+```text
+- Hiển thị danh sách bệnh nhân đang chờ theo từng phòng khám.
+- Cập nhật realtime khi có bệnh nhân mới vào hàng hoặc được gọi khám.
+- Bắt đầu từ một service đơn giản, phát triển dần thành kiến trúc có API, state, facade và realtime handler.
 ```
 
 ---
 
 ## 1. Tổng quan về Dependency Injection
 
-### 1.1. Dependency Injection là gì?
+### 1.1. Vì sao Dependency Injection ra đời
 
-**Dependency Injection**, viết tắt là **DI**, là cơ chế giúp một class không cần tự tạo các object mà nó phụ thuộc vào. Thay vào đó, class chỉ khai báo dependency cần dùng, còn Angular chịu trách nhiệm tìm, tạo và truyền dependency đó vào.
+Giả sử `PatientQueueComponent` cần tải dữ liệu hàng chờ khám bệnh — cách viết trực tiếp nhất là để component tự tạo ra service mà nó cần dùng:
 
-Ví dụ component cần gọi API lấy danh sách hàng chờ khám bệnh:
+```ts
+export class PatientQueueComponent {
+  private readonly queueService = new PatientQueueService();
+}
+```
+
+Cách này trông đơn giản, nhưng component vừa nhận thêm một trách nhiệm mới: tự tạo ra `PatientQueueService`.
+
+Vấn đề lộ rõ ngay khi `PatientQueueService` cần thêm dependency của riêng nó:
+
+```ts
+export class PatientQueueService {
+  constructor(private readonly http: HttpClient) {}
+}
+```
+
+Component không thể chỉ gọi:
+
+```ts
+new PatientQueueService();
+```
+
+nữa — nó phải biết cách tạo `HttpClient` trước, rồi mới tạo được `PatientQueueService`.
+
+```text
+PatientQueueComponent
+→ tự tạo PatientQueueService
+→ tự tạo HttpClient
+→ tự tạo HttpBackend
+→ tự cấu hình interceptor
+→ tự quản lý lifecycle
+```
+
+Việc khởi tạo cứ thế kéo dài theo từng tầng dependency, và đây không còn là việc của một component chỉ có nhiệm vụ hiển thị hàng chờ. Cách làm này gây ra nhiều vấn đề:
+
+```text
+1. Coupling cao
+   Component phụ thuộc trực tiếp vào implementation cụ thể.
+
+2. Khó thay implementation
+   Không thể dễ dàng đổi API thật thành mock hoặc adapter khác.
+
+3. Khó test
+   Test phải sử dụng dependency thật hoặc can thiệp vào code production.
+
+4. Không quản lý được scope
+   Không rõ object được dùng chung hay tạo mới.
+
+5. Không quản lý được lifecycle
+   Không rõ ai chịu trách nhiệm cleanup timer, subscription, connection.
+
+6. Dependency chain bị phân tán
+   Mỗi class tự tạo dependency khiến việc khởi tạo hệ thống khó kiểm soát.
+```
+
+Dependency Injection ra đời để giải quyết đúng nhóm vấn đề này: tách việc "class cần gì" ra khỏi việc "thứ đó được tạo ra bằng cách nào", và giao việc tạo dependency cho một cơ chế chung thay vì để từng class tự lo.
+
+---
+
+### 1.2. Dependency là gì?
+
+**Dependency** là một object hoặc capability mà class cần dùng, nhưng không tự mình tạo ra — như `PatientQueueComponent` cần `PatientQueueService` để tải dữ liệu hàng chờ ở ví dụ trên. `PatientQueueService` chính là một dependency của `PatientQueueComponent`.
+
+Một class thường cần nhiều hơn một dependency:
+
+```ts
+export class PatientQueueComponent {
+  constructor(
+    private readonly queueService: PatientQueueService,
+    private readonly notificationService: NotificationService
+  ) {}
+}
+```
+
+```text
+PatientQueueService
+→ tải và xử lý dữ liệu hàng chờ.
+
+NotificationService
+→ hiển thị thông báo cho người dùng.
+```
+
+Dependency không nhất thiết luôn là service nghiệp vụ. Nó có thể là:
+
+```text
+- HttpClient
+- Router
+- Logger
+- Configuration object
+- API base URL
+- Feature flag
+- Factory function
+- Plugin list
+- Storage adapter
+- State store
+```
+
+---
+
+### 1.3. DI thay đổi trách nhiệm như thế nào?
+
+Angular DI chính là lời giải cho vấn đề ở [§1.1](#11-vì-sao-dependency-injection-ra-đời):
+
+```text
+- Class không còn tự tạo dependency, mà chỉ khai báo mình cần gì.
+- Việc tạo ra và cung cấp dependency đó thuộc về Angular.
+```
 
 ```ts
 @Component({
@@ -35,14 +147,10 @@ Ví dụ component cần gọi API lấy danh sách hàng chờ khám bệnh:
   templateUrl: './patient-queue.component.html'
 })
 export class PatientQueueComponent {
-  constructor(private queueService: PatientQueueService) {}
+  constructor(
+    private readonly queueService: PatientQueueService
+  ) {}
 }
-```
-
-Component không tự tạo service:
-
-```ts
-const queueService = new PatientQueueService();
 ```
 
 Component chỉ khai báo:
@@ -51,452 +159,333 @@ Component chỉ khai báo:
 Tôi cần PatientQueueService.
 ```
 
-Angular sẽ xử lý phía sau:
+Angular chịu trách nhiệm:
 
 ```text
-- Ai cung cấp PatientQueueService?
-- Service này đã có instance chưa?
-- Nếu chưa có thì tạo như thế nào?
-- Instance này dùng chung toàn app hay chỉ dùng riêng cho component này?
+- Token cần resolve là gì?
+- Provider nằm ở injector nào?
+- Dùng implementation nào?
+- Instance đã tồn tại chưa?
+- Có cần tạo instance mới không?
+- Instance này sống bao lâu?
+- Những dependency của PatientQueueService được tạo như thế nào?
 ```
 
-DI giúp code dễ mở rộng hơn vì class sử dụng dependency không bị phụ thuộc chặt vào cách dependency được tạo ra.
-
----
-
-### 1.2. Dependency là gì?
-
-**Dependency** là thứ mà một class cần để hoạt động.
-
-Ví dụ:
-
-```ts
-export class PatientQueueComponent {
-  constructor(
-    private queueService: PatientQueueService,
-    private notificationService: NotificationService
-  ) {}
-}
-```
-
-Ở đây `PatientQueueService` và `NotificationService` là dependency của `PatientQueueComponent`.
-
-Có thể hiểu đơn giản:
+DI đảo ngược quyền kiểm soát việc tạo object:
 
 ```text
-Class A cần dùng Class B để làm việc
-→ Class B là dependency của Class A.
-```
-
-Ví dụ thực tế:
-
-```text
-PatientQueueComponent cần PatientQueueService để lấy danh sách hàng chờ.
-PatientQueueService cần HttpClient để gọi API.
-AuthInterceptor cần TokenService để lấy access token.
-PermissionService cần CurrentUserService để kiểm tra quyền.
-```
-
----
-
-### 1.3. Vì sao không nên tự `new` dependency?
-
-Ví dụ không dùng DI:
-
-```ts
-export class PatientQueueComponent {
-  private queueService = new PatientQueueService();
-}
-```
-
-Cách này có một số vấn đề:
-
-```text
-- Component phụ thuộc chặt vào implementation cụ thể.
-- Khó thay PatientQueueService bằng MockPatientQueueService khi test.
-- Khó kiểm soát service này dùng chung hay tạo mới.
-- Nếu service có dependency khác như HttpClient, việc tự new sẽ phức tạp.
-- Vòng đời instance không do Angular quản lý.
-```
+Không dùng DI:
+Class chủ động tạo dependency.
 
 Dùng DI:
-
-```ts
-export class PatientQueueComponent {
-  constructor(private queueService: PatientQueueService) {}
-}
+Class khai báo dependency.
+Framework tạo và cung cấp dependency.
 ```
 
-Lợi ích:
+Đây là một dạng của **Inversion of Control** (đảo ngược quyền điều khiển): thông thường class tự quyết định cách tạo dependency, nhưng ở đây quyền đó được chuyển giao cho framework — class chỉ còn quyết định mình cần gì.
+
+---
+
+### 1.4. DI mang lại giá trị gì?
+
+DI không tự động làm kiến trúc tốt. Nhưng nó tạo ra nền tảng để thiết kế kiến trúc tốt hơn.
 
 ```text
-- Angular quản lý cách tạo dependency.
-- Có thể thay implementation qua provider.
-- Có thể mock dễ hơn khi test.
-- Có thể kiểm soát scope và lifecycle.
-- Code ít phụ thuộc chặt vào object cụ thể.
+- Dependency được thể hiện rõ.
+- Implementation có thể thay thế.
+- State và resource có lifecycle rõ.
+- Component có thể mỏng hơn.
+- Service dễ test độc lập.
+- Feature có thể tự quản lý scope.
+- Global resource không bị tạo lặp ngoài ý muốn.
+- Các boundary hạ tầng dễ tách khỏi business logic.
+```
+
+Điểm quan trọng nhất:
+
+> Giá trị của DI không nằm ở việc bỏ từ khóa `new`.
+> Giá trị nằm ở việc đưa quyền quản lý dependency về một composition mechanism thống nhất.
+
+---
+
+## 2. Mô hình hoạt động của Angular DI
+
+Angular DI xoay quanh bốn khái niệm:
+
+```text
+Token
+Provider
+Injector
+Injection context
 ```
 
 ---
 
-### 1.4. Service là gì trong Angular?
+### 2.1. Token
 
-Trong Angular, **service** thường là class chứa logic không nên đặt trực tiếp trong component.
+Token là key mà Angular dùng để tìm dependency.
 
 Ví dụ:
 
 ```ts
-@Injectable({
-  providedIn: 'root'
-})
-export class PatientQueueService {
-  constructor(private http: HttpClient) {}
-
-  getQueue(roomId: number) {
-    return this.http.get(`/api/rooms/${roomId}/queue`);
-  }
-}
+constructor(
+  private readonly queueService: PatientQueueService
+) {}
 ```
 
-Service thường dùng cho:
+Ở đây `PatientQueueService` có hai vai trò:
 
 ```text
-- Gọi API.
-- Giữ state.
-- Xử lý business logic.
-- Format/transform data.
-- Kiểm tra quyền.
-- Gửi notification.
-- Kết nối realtime/websocket.
-- Làm facade cho component.
+TypeScript type
+→ giúp compiler kiểm tra kiểu.
+
+Runtime DI token
+→ giúp Angular tìm provider.
 ```
 
-Khi mới bắt đầu, dev thường viết nhiều logic trong component:
-
-```text
-Component vừa gọi API.
-Component vừa giữ state.
-Component vừa xử lý websocket.
-Component vừa check quyền.
-Component vừa map DTO sang view model.
-```
-
-Khi code lớn dần, component sẽ khó đọc, khó test và khó maintain. DI giúp tách logic sang các service phù hợp.
+Vì `class` còn tồn tại ở runtime, Angular có thể sử dụng chính class làm token.
 
 ---
 
-## 2. Các khái niệm cốt lõi trong Angular DI
+### 2.2. Provider
 
-### 2.1. Token là gì?
+Provider là cấu hình trả lời câu hỏi:
 
-**Token** là thứ Angular dùng để định danh dependency cần resolve.
+```text
+Khi có code cần token X,
+Angular phải cung cấp giá trị nào?
+```
 
 Ví dụ:
-
-```ts
-constructor(private queueService: PatientQueueService) {}
-```
-
-Ở đây `PatientQueueService` vừa là type, vừa là token runtime để Angular tìm provider tương ứng.
-
-Với các dependency không có runtime type như interface, primitive value hoặc config object, cần dùng `InjectionToken`.
-
-Ví dụ:
-
-```ts
-export const API_BASE_URL = new InjectionToken<string>('API_BASE_URL');
-```
-
-Tóm tắt:
-
-```text
-Token = key để Angular đi tìm dependency.
-Provider = cấu hình nói token đó được tạo/trả về như thế nào.
-Injector = nơi lưu provider và resolve token.
-```
-
----
-
-### 2.2. `@Injectable()` là gì?
-
-`@Injectable()` là decorator đánh dấu một class có thể tham gia vào Angular Dependency Injection system.
-
-Ví dụ:
-
-```ts
-@Injectable()
-export class PatientQueueService {
-  constructor(private http: HttpClient) {}
-}
-```
-
-Khi có `@Injectable()`, Angular biết class này có thể được DI tạo instance và có thể phân tích dependency trong constructor.
-
-Nói dễ hiểu:
-
-```text
-@Injectable() giúp Angular biết:
-Class này có thể được DI tạo ra.
-Class này có thể có dependency cần inject vào constructor.
-```
-
----
-
-### 2.3. `@Injectable()` có tự tạo provider không?
-
-Đây là điểm rất dễ nhầm.
-
-Ví dụ:
-
-```ts
-@Injectable()
-export class PatientQueueService {}
-```
-
-Đoạn trên mới chỉ nói rằng `PatientQueueService` là class có thể tham gia DI. Nhưng nếu không có provider, Angular vẫn chưa biết phải lấy instance của service này từ đâu.
-
-Nếu component inject service:
-
-```ts
-@Component({
-  selector: 'app-patient-queue',
-  templateUrl: './patient-queue.component.html'
-})
-export class PatientQueueComponent {
-  constructor(private queueService: PatientQueueService) {}
-}
-```
-
-nhưng chưa provide service ở đâu cả, có thể gặp lỗi:
-
-```text
-NullInjectorError: No provider for PatientQueueService
-```
-
-Cần đăng ký provider bằng một trong các cách sau.
-
-Cách 1: dùng `providedIn`:
-
-```ts
-@Injectable({
-  providedIn: 'root'
-})
-export class PatientQueueService {}
-```
-
-Cách 2: provide trong component:
-
-```ts
-@Component({
-  selector: 'app-patient-queue',
-  providers: [PatientQueueService],
-  templateUrl: './patient-queue.component.html'
-})
-export class PatientQueueComponent {}
-```
-
-Cách 3: provide trong route:
-
-```ts
-export const routes: Routes = [
-  {
-    path: 'patient-queue',
-    providers: [PatientQueueService],
-    loadComponent: () =>
-      import('./patient-queue.page').then(m => m.PatientQueuePage)
-  }
-];
-```
-
-Câu chốt:
-
-```text
-@Injectable() trả lời câu hỏi:
-Angular có biết cách tạo class này không?
-
-providedIn/providers trả lời câu hỏi:
-Class này được đăng ký ở injector nào và sống bao lâu?
-```
-
----
-
-### 2.4. Provider là gì?
-
-**Provider** là cấu hình nói với Angular cách cung cấp một dependency.
-
-Nói đơn giản:
-
-```text
-Khi ai đó cần token X, hãy trả về class/value/factory Y.
-```
-
-Ví dụ đơn giản nhất:
-
-```ts
-@Injectable({
-  providedIn: 'root'
-})
-export class PatientQueueService {}
-```
-
-Hoặc:
-
-```ts
-@Component({
-  providers: [PatientQueueService]
-})
-export class PatientQueueComponent {}
-```
-
-Cả hai cách trên đều tạo provider cho `PatientQueueService`, nhưng khác nhau về scope.
-
-Một số dạng provider phổ biến:
 
 ```ts
 providers: [
-  PatientQueueService,
-
   {
     provide: QueueApi,
     useClass: HttpQueueApi
-  },
-
-  {
-    provide: API_BASE_URL,
-    useValue: 'https://api.example.com'
-  },
-
-  {
-    provide: QueueConfig,
-    useFactory: queueConfigFactory,
-    deps: [EnvironmentService]
   }
 ]
 ```
 
-Trước mắt chỉ cần nhớ:
+Có thể đọc thành:
 
 ```text
-Provider = nơi đăng ký dependency cho Angular DI.
+Khi cần QueueApi,
+hãy tạo hoặc trả về HttpQueueApi.
 ```
 
-Các dạng `useClass`, `useValue`, `useFactory`, `useExisting` sẽ được trình bày kỹ ở phần sau.
+Provider không chỉ dùng để ánh xạ class. Nó có thể trả về:
+
+```text
+- Một class instance
+- Một object cấu hình
+- Một primitive value
+- Kết quả của factory
+- Instance của token khác
+- Danh sách nhiều implementation
+```
 
 ---
 
-### 2.5. Injector là gì?
+### 2.3. Injector
 
-**Injector** là nơi Angular lưu provider và tạo/trả instance khi có class cần dependency.
+Injector là runtime container lưu provider và quản lý instance.
 
-Mental model:
-
-```text
-Component cần A
-→ hỏi injector hiện tại có provider cho A không?
-    Có  → trả instance
-    Không → hỏi injector cha
-```
-
-Angular DI có tính phân cấp.
+Mental model đơn giản:
 
 ```text
-Root Injector
- └── Route/Feature Injector
-      └── Component Injector
-           └── Child Component Injector
+Class cần token X
+→ hỏi injector hiện tại
+→ injector tìm provider của X
+→ tạo hoặc trả instance đã cache
 ```
+
+Angular không chỉ có một injector duy nhất. Injector có cấu trúc phân cấp.
+
+```text
+Environment Injector / Root Injector
+└── Route Injector
+    └── Component Element Injector
+        └── Child Component Element Injector
+```
+
+Do đó cùng một token có thể có nhiều instance tại các nhánh injector khác nhau.
+
+---
+
+### 2.4. Dependency resolution flow
 
 Ví dụ:
 
 ```ts
-@Component({
-  selector: 'app-patient-queue',
-  templateUrl: './patient-queue.component.html'
-})
-export class PatientQueueComponent {
-  constructor(private queueService: PatientQueueService) {}
+@Injectable()
+export class PatientQueueFacade {
+  constructor(
+    private readonly api: PatientQueueApi,
+    private readonly state: PatientQueueState
+  ) {}
 }
 ```
 
-Khi `PatientQueueComponent` cần `PatientQueueService`, Angular sẽ đi tìm provider theo thứ tự gần đến xa:
+Khi Angular cần tạo `PatientQueueFacade`:
 
 ```text
-1. Injector của chính component đó.
-2. Injector của component cha.
-3. Injector của route/feature.
-4. Root injector.
+1. Tìm provider của PatientQueueFacade.
+2. Đọc metadata để biết constructor cần PatientQueueApi và PatientQueueState.
+3. Resolve PatientQueueApi.
+4. Resolve PatientQueueState.
+5. Tạo PatientQueueFacade với hai dependency đã resolve.
+6. Cache instance theo injector chứa provider của PatientQueueFacade.
+7. Trả instance cho consumer.
 ```
 
-Đây là nền tảng để hiểu vì sao cùng một service có thể có nhiều instance khác nhau.
+Nếu `PatientQueueApi` tiếp tục cần `HttpClient`, Angular lặp lại quy trình cho đến khi resolve toàn bộ dependency graph.
 
 ---
 
-### 2.6. Ví dụ inject service vào component
+### 2.5. Instance được cache theo provider và injector
 
-Service:
+Giả sử provider nằm ở route:
 
 ```ts
-@Injectable({
-  providedIn: 'root'
-})
+{
+  path: 'patient-queue',
+  providers: [PatientQueueState]
+}
+```
+
+Trong route injector đó:
+
+```text
+Lần resolve đầu:
+→ Angular tạo PatientQueueState.
+
+Những lần resolve sau:
+→ Angular trả lại cùng instance.
+```
+
+Nhưng route khác provide cùng token:
+
+```ts
+{
+  path: 'patient-queue-monitor',
+  providers: [PatientQueueState]
+}
+```
+
+Sẽ có instance khác.
+
+```text
+Route A Injector → PatientQueueState instance A
+Route B Injector → PatientQueueState instance B
+```
+
+Vì vậy câu:
+
+```text
+Service Angular là singleton.
+```
+
+không chính xác trong mọi trường hợp.
+
+Cách nói chính xác hơn:
+
+> Một provider thường có một instance được cache trong phạm vi injector chứa provider đó.
+
+---
+
+## 3. `@Injectable()` và metadata
+
+### 3.1. `@Injectable()` là gì?
+
+`@Injectable()` là decorator cung cấp metadata để Angular có thể tạo class thông qua DI.
+
+```ts
+@Injectable()
 export class PatientQueueService {
-  getCurrentQueue() {
-    return [];
-  }
+  constructor(
+    private readonly http: HttpClient
+  ) {}
 }
 ```
 
-Component:
+Metadata giúp Angular biết:
+
+```text
+- Class này tham gia DI.
+- Constructor cần những dependency nào.
+- Class có default provider thông qua providedIn hay không.
+```
+
+---
+
+### 3.2. Vì sao Angular cần metadata?
+
+TypeScript type information không phải lúc nào cũng còn nguyên sau khi compile.
+
+Angular compiler cần tạo factory tương đương với mental model:
 
 ```ts
-@Component({
-  selector: 'app-patient-queue',
-  templateUrl: './patient-queue.component.html'
-})
-export class PatientQueueComponent {
-  constructor(private queueService: PatientQueueService) {}
-
-  ngOnInit() {
-    const queue = this.queueService.getCurrentQueue();
-  }
+function PatientQueueService_Factory() {
+  return new PatientQueueService(
+    inject(HttpClient)
+  );
 }
 ```
 
-Ý nghĩa:
-
-```text
-PatientQueueComponent cần PatientQueueService.
-PatientQueueService được provide ở root.
-Angular lấy instance từ root injector và truyền vào component.
-```
+Bạn không viết factory này bằng tay. Angular compiler tạo dựa trên metadata.
 
 ---
 
-## 3. Provider Scope và Lifecycle
-
-### 3.1. Vì sao DI scope quan trọng?
-
-Khi app nhỏ, ta thường để mọi service là `providedIn: 'root'`. Cách này dễ dùng, ít lỗi ban đầu.
-
-Nhưng khi app lớn hơn, service bắt đầu giữ state, mở websocket, cache data, subscribe event hoặc phục vụ từng màn hình riêng. Lúc đó, scope sai có thể gây bug khó hiểu.
-
-Ví dụ các câu hỏi thực tế:
-
-```text
-- Tại sao set data trong service rồi component khác không nhận?
-- Tại sao rời màn hình rồi quay lại mà filter cũ vẫn còn?
-- Tại sao mở 3 tab thì state của tab này ảnh hưởng tab kia?
-- Tại sao websocket bị mở nhiều connection?
-- Tại sao cache bị miss dù tưởng đang dùng chung service?
-```
-
-Nhiều bug Angular không nằm ở RxJS hay component, mà nằm ở DI scope.
-
----
-
-### 3.2. `providedIn: 'root'`
+### 3.3. `@Injectable()` không đồng nghĩa đã có provider
 
 Ví dụ:
+
+```ts
+@Injectable()
+export class PatientQueueState {}
+```
+
+Class này có metadata để Angular tạo được instance.
+
+Nhưng nếu không có:
+
+```text
+- providedIn
+- providers ở route
+- providers ở component
+- providers ở application config
+```
+
+thì Angular vẫn không biết injector nào chịu trách nhiệm cung cấp nó.
+
+Khi inject:
+
+```ts
+constructor(
+  private readonly state: PatientQueueState
+) {}
+```
+
+có thể gặp:
+
+```text
+NullInjectorError: No provider for PatientQueueState
+```
+
+Phân biệt:
+
+```text
+@Injectable()
+→ Angular biết cách tạo class.
+
+providedIn/providers
+→ Angular biết đăng ký provider ở đâu.
+```
+
+---
+
+### 3.4. `@Injectable({ providedIn: 'root' })`
 
 ```ts
 @Injectable({
@@ -505,126 +494,158 @@ Ví dụ:
 export class AuthService {}
 ```
 
-Ý nghĩa cơ bản:
+Đoạn code trên thực hiện hai việc:
 
 ```text
-AuthService được đăng ký ở root injector.
-Các nơi inject AuthService trong app thường dùng chung một instance.
+1. Đánh dấu AuthService có thể được DI tạo.
+2. Đăng ký default provider tại root environment injector.
 ```
 
-Các service phù hợp với root scope:
-
-```text
-- AuthService.
-- PermissionService.
-- CurrentUserService.
-- CurrentTenantService.
-- AppConfigService.
-- LoggerService.
-- ToastService.
-- NotificationService.
-```
-
-Nhưng không nên hiểu quá đơn giản rằng:
-
-```text
-providedIn: 'root' = singleton tuyệt đối trong mọi hoàn cảnh.
-```
-
-Nói chính xác hơn:
-
-```text
-providedIn: 'root' tạo một provider ở root injector của application instance.
-```
-
-Với đa số app Angular thông thường, điều này tương đương một instance dùng chung toàn app.
-
----
-
-### 3.3. Root scope
-
-Root scope phù hợp cho dependency dùng chung toàn app:
-
-```text
-- Auth/session.
-- Permission.
-- Tenant hiện tại.
-- App config.
-- Logger.
-- Toast/notification.
-- Shared cache thật sự global.
-- WebSocket connection dùng chung toàn app.
-```
-
-Không nên đưa lên root nếu:
-
-```text
-- State chỉ phục vụ một màn hình.
-- Khi rời màn hình cần reset state.
-- Mỗi instance component cần state riêng.
-- Service chứa filter/table selection/modal state local.
-```
-
----
-
-### 3.4. Route/Feature scope
-
-Với Angular hiện đại, route có thể khai báo provider:
+Có thể hiểu gần tương đương:
 
 ```ts
-export const patientQueueRoutes: Routes = [
+@Injectable()
+export class AuthService {}
+
+bootstrapApplication(AppComponent, {
+  providers: [AuthService]
+});
+```
+
+Tuy nhiên `providedIn: 'root'` có lợi thế tree-shakable provider: nếu service không được sử dụng, build optimizer có thể loại bỏ nó tốt hơn.
+
+---
+
+### 3.5. Khi nào nên dùng `providedIn: 'root'`?
+
+Phù hợp với service thật sự thuộc phạm vi application:
+
+```text
+- Authentication
+- Current user/session
+- Permission
+- Global application config
+- Global logger
+- Toast/notification
+- Shared cache có key đúng
+- Một physical WebSocket connection dùng chung
+```
+
+Không nên dùng theo thói quen cho mọi service.
+
+Các service sau thường cần scope hẹp hơn:
+
+```text
+- Feature state
+- Wizard state
+- Modal state
+- Filter state
+- Selection state
+- Feature workflow
+- Feature realtime handler
+```
+
+---
+
+### 3.6. Có class không inject dependency thì cần `@Injectable()` không?
+
+Ví dụ:
+
+```ts
+export class QueueMapper {
+  map(dto: QueueDto): QueueVm {
+    return {
+      id: dto.id,
+      name: dto.patientName
+    };
+  }
+}
+```
+
+Nếu class chỉ được tạo thủ công:
+
+```ts
+const mapper = new QueueMapper();
+```
+
+thì không cần `@Injectable()`.
+
+Nếu muốn Angular tạo thông qua provider:
+
+```ts
+providers: [QueueMapper]
+```
+
+nên đánh dấu rõ:
+
+```ts
+@Injectable()
+export class QueueMapper {}
+```
+
+Điều này giúp code nhất quán và an toàn khi sau này class có thêm constructor dependency.
+
+---
+
+## 4. Provider và các cách đăng ký dependency
+
+### 4.1. Provider tại root
+
+Cách phổ biến:
+
+```ts
+@Injectable({
+  providedIn: 'root'
+})
+export class AuthService {}
+```
+
+Hoặc application-level providers:
+
+```ts
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideRouter(routes),
+    provideHttpClient(),
+    AuthService
+  ]
+});
+```
+
+Root provider sống theo application instance.
+
+---
+
+### 4.2. Provider tại route
+
+```ts
+export const routes: Routes = [
   {
-    path: '',
+    path: 'patient-queue',
     providers: [
-      PatientQueueFacade,
+      PatientQueueApi,
       PatientQueueState,
-      PatientQueueRealtimeHandler
+      PatientQueueFacade
     ],
     loadComponent: () =>
-      import('./patient-queue.page').then(m => m.PatientQueuePage)
+      import('./patient-queue.page')
+        .then(m => m.PatientQueuePage)
   }
 ];
 ```
 
-Ý nghĩa:
+Route provider phù hợp khi:
 
 ```text
-Các service này sống trong phạm vi route/feature patient-queue.
-Khi rời feature, state có thể được reset nếu không còn reference giữ lại.
+- State chỉ thuộc feature.
+- Rời feature muốn giải phóng state.
+- Các page con cần dùng chung một instance.
+- Không muốn global service giữ dữ liệu màn hình.
 ```
-
-Route/feature scope phù hợp cho:
-
-```text
-- Feature state.
-- Feature facade.
-- Feature-specific API service.
-- Workflow service.
-- Realtime handler của riêng feature.
-- Cache chỉ có giá trị trong một màn hình lớn.
-```
-
-Ví dụ:
-
-```text
-Root:
-- WebSocketConnectionService
-
-Route patient-queue:
-- PatientQueueRealtimeHandler
-- PatientQueueState
-- PatientQueueFacade
-```
-
-Connection thật sự có thể dùng chung toàn app, nhưng handler xử lý event cho màn hàng chờ nên scoped theo route.
 
 ---
 
-### 3.5. Component scope
-
-Provider ở component tạo instance riêng cho component đó và subtree của nó.
-
-Ví dụ:
+### 4.3. Provider tại component
 
 ```ts
 @Component({
@@ -632,149 +653,115 @@ Ví dụ:
   providers: [RoomFilterState],
   templateUrl: './room-filter.component.html'
 })
-export class RoomFilterComponent {
-  constructor(public state: RoomFilterState) {}
-}
+export class RoomFilterComponent {}
 ```
 
-Nếu render 3 component:
+Mỗi instance `RoomFilterComponent` có một `RoomFilterState` riêng.
 
-```html
-<app-room-filter [roomId]="1"></app-room-filter>
-<app-room-filter [roomId]="2"></app-room-filter>
-<app-room-filter [roomId]="3"></app-room-filter>
-```
-
-thì sẽ có 3 instance `RoomFilterState` khác nhau.
-
-Component scope phù hợp cho:
+Phù hợp với:
 
 ```text
-- Modal state.
-- Wizard state.
-- Filter state.
-- Table selection state.
-- Local form state.
-- Tab-specific state.
-- Component-level cache.
+- Local form state
+- Modal state
+- Wizard state
+- Table selection
+- Filter instance
+- Local cache
 ```
 
-Ví dụ sai thường gặp:
+---
+
+### 4.4. Provider shorthand
+
+```ts
+providers: [PatientQueueState]
+```
+
+là dạng rút gọn của:
+
+```ts
+providers: [
+  {
+    provide: PatientQueueState,
+    useClass: PatientQueueState
+  }
+]
+```
+
+Token và implementation giống nhau nên Angular cho phép viết rút gọn.
+
+---
+
+### 4.5. Override provider
+
+Provider gần consumer hơn có thể override provider ở tầng cha.
+
+Root:
 
 ```ts
 @Injectable({
   providedIn: 'root'
 })
-export class SearchBoxState {
-  keyword = '';
+export class LoggerService {}
+```
+
+Feature:
+
+```ts
+{
+  path: 'debug',
+  providers: [
+    {
+      provide: LoggerService,
+      useClass: DebugLoggerService
+    }
+  ]
 }
 ```
 
-Nếu `SearchBoxState` chỉ phục vụ từng ô search riêng, để root có thể làm các search box ảnh hưởng lẫn nhau.
+Trong route `debug`:
 
-Tốt hơn:
-
-```ts
-@Component({
-  selector: 'app-search-box',
-  providers: [SearchBoxState],
-  templateUrl: './search-box.component.html'
-})
-export class SearchBoxComponent {}
+```text
+inject(LoggerService)
+→ nhận DebugLoggerService.
 ```
+
+Ngoài route:
+
+```text
+inject(LoggerService)
+→ nhận root LoggerService.
+```
+
+Đây là cơ chế hữu ích, nhưng cũng là nguyên nhân gây bug nhiều instance khi override ngoài ý muốn.
 
 ---
 
-### 3.6. So sánh nhanh các scope
+## 5. Các loại Provider
 
-```text
-Root scope
-→ Dùng chung toàn app.
-→ Sống lâu theo app.
-→ Phù hợp auth, permission, config, logger.
+### 5.1. `useClass`
 
-Route/Feature scope
-→ Dùng chung trong một feature/route.
-→ Có thể reset khi rời feature.
-→ Phù hợp feature state, facade, workflow.
-
-Component scope
-→ Mỗi component instance có một instance riêng.
-→ Sống theo component subtree.
-→ Phù hợp modal, filter, wizard, selection state.
-```
-
-Câu hỏi cần hỏi khi tạo service mới:
-
-```text
-State/service này nên sống bao lâu?
-Ai cần dùng chung nó?
-Khi rời màn hình có cần reset không?
-Nếu render nhiều component giống nhau, chúng có nên dùng chung state không?
-```
-
----
-
-### 3.7. Lazy loading và nhiều instance service
-
-Trong Angular dùng NgModule cũ, nếu service được provide trong lazy module:
-
-```ts
-@NgModule({
-  providers: [PatientQueueState]
-})
-export class PatientQueueModule {}
-```
-
-service này thuộc injector của lazy module/route, không phải root.
-
-Điều này có thể đúng hoặc sai tùy ý đồ.
-
-Đúng nếu:
-
-```text
-- Feature cần state riêng.
-- Khi rời feature muốn reset state.
-- Không muốn state phình lên global.
-```
-
-Sai nếu:
-
-```text
-- AuthService bị provide lại trong lazy module.
-- PermissionService có cache riêng từng feature.
-- WebSocketService bị tạo nhiều connection.
-- EventBusService bị duplicate instance.
-```
-
-Rule thực tế:
-
-```text
-Global service không provide lại trong lazy module/component.
-Feature state thì nên scoped theo route/feature.
-```
-
----
-
-## 4. Các dạng Provider
-
-### 4.1. Class Provider — `useClass`
-
-`useClass` nói với Angular rằng khi ai đó inject token A, hãy tạo instance của class B.
-
-Ví dụ:
+Dùng khi token cần ánh xạ tới một implementation class.
 
 ```ts
 export abstract class QueueApi {
-  abstract getQueue(roomId: number): Observable<QueueDto>;
+  abstract getQueue(
+    roomId: number
+  ): Observable<QueueDto[]>;
 }
+```
 
+Implementation:
+
+```ts
 @Injectable()
 export class HttpQueueApi implements QueueApi {
-  constructor(private http: HttpClient) {}
+  private readonly http = inject(HttpClient);
 
-  getQueue(roomId: number) {
-    return this.http.get<QueueDto>(`/api/rooms/${roomId}/queue`);
+  getQueue(roomId: number): Observable<QueueDto[]> {
+    return this.http.get<QueueDto[]>(
+      `/api/rooms/${roomId}/queue`
+    );
   }
 }
 ```
@@ -790,91 +777,141 @@ providers: [
 ]
 ```
 
-Inject:
-
-```ts
-constructor(private api: QueueApi) {}
-```
-
-Ý nghĩa:
-
-```text
-Component/facade phụ thuộc vào QueueApi abstraction.
-Runtime Angular cung cấp HttpQueueApi implementation.
-```
-
-Dùng khi muốn thay implementation:
-
-```text
-Production → HttpQueueApi.
-Unit test → MockQueueApi.
-Offline mode → LocalQueueApi.
-Demo mode → FakeQueueApi.
-```
-
----
-
-### 4.2. Value Provider — `useValue`
-
-`useValue` dùng để cung cấp một giá trị cố định.
-
-Ví dụ:
-
-```ts
-export const API_BASE_URL = new InjectionToken<string>('API_BASE_URL');
-```
-
-Provider:
-
-```ts
-providers: [
-  {
-    provide: API_BASE_URL,
-    useValue: 'https://api.example.com'
-  }
-]
-```
-
-Inject:
+Consumer:
 
 ```ts
 @Injectable()
-export class PatientApiService {
+export class PatientQueueFacade {
   constructor(
-    @Inject(API_BASE_URL) private baseUrl: string
+    private readonly api: QueueApi
   ) {}
 }
 ```
 
-Dùng cho:
+Lợi ích:
 
 ```text
-- Base URL.
-- Static config.
-- Feature flags.
-- Default options.
-- Primitive values.
-- Constant object.
+Production → HttpQueueApi
+Testing    → FakeQueueApi
+Offline    → LocalQueueApi
 ```
 
 ---
 
-### 4.3. Factory Provider — `useFactory`
+### 5.2. Khi nào abstraction là cần thiết?
 
-`useFactory` dùng khi dependency cần logic khởi tạo.
+Không cần tạo interface/abstract class cho mọi service.
 
-Ví dụ:
+Không cần thiết:
 
 ```ts
-export function createQueueApi(
-  env: EnvironmentService,
-  http: HttpClient
-): QueueApi {
-  if (env.useMockApi) {
-    return new MockQueueApi();
-  }
+export class PatientQueueMapper {}
+export interface IPatientQueueMapper {}
+```
 
-  return new HttpQueueApi(http);
+nếu:
+
+```text
+- Chỉ có một implementation.
+- Không có boundary cần thay thế.
+- Test có thể dùng class thật.
+```
+
+Abstraction hữu ích khi:
+
+```text
+- External integration.
+- Có nhiều implementation.
+- Cần switch theo môi trường.
+- Cần plugin/strategy.
+- Đây là boundary giữa business và infrastructure.
+```
+
+DI không đồng nghĩa mọi class phải có interface một-một.
+
+---
+
+### 5.3. `useValue`
+
+Dùng để cung cấp một value có sẵn.
+
+```ts
+export interface QueueConfig {
+  refreshIntervalMs: number;
+  maxRetry: number;
+}
+
+export const QUEUE_CONFIG =
+  new InjectionToken<QueueConfig>('QUEUE_CONFIG');
+```
+
+Provider:
+
+```ts
+providers: [
+  {
+    provide: QUEUE_CONFIG,
+    useValue: {
+      refreshIntervalMs: 5000,
+      maxRetry: 3
+    }
+  }
+]
+```
+
+Inject:
+
+```ts
+@Injectable()
+export class QueuePollingService {
+  constructor(
+    @Inject(QUEUE_CONFIG)
+    private readonly config: QueueConfig
+  ) {}
+}
+```
+
+Phù hợp với:
+
+```text
+- Static config
+- Feature flag
+- Default options
+- Primitive values
+- Prebuilt object
+```
+
+Cẩn thận với object mutable:
+
+```ts
+this.config.maxRetry = 100;
+```
+
+Vì mọi consumer có thể đang nhận cùng reference.
+
+Nên ưu tiên immutable config:
+
+```ts
+export interface QueueConfig {
+  readonly refreshIntervalMs: number;
+  readonly maxRetry: number;
+}
+```
+
+---
+
+### 5.4. `useFactory`
+
+Dùng khi giá trị cần logic khởi tạo.
+
+```ts
+export function queueConfigFactory(
+  env: EnvironmentService
+): QueueConfig {
+  return {
+    refreshIntervalMs: env.production ? 10000 : 3000,
+    maxRetry: env.production ? 5 : 1
+  };
 }
 ```
 
@@ -883,42 +920,73 @@ Provider:
 ```ts
 providers: [
   {
-    provide: QueueApi,
-    useFactory: createQueueApi,
-    deps: [EnvironmentService, HttpClient]
+    provide: QUEUE_CONFIG,
+    useFactory: queueConfigFactory,
+    deps: [EnvironmentService]
   }
 ]
 ```
 
-Dùng khi cần chọn dependency theo:
+Luồng:
 
 ```text
-- Environment.
-- Tenant.
-- Feature flag.
-- Runtime config.
-- Platform browser/server.
+Angular cần QUEUE_CONFIG
+→ resolve EnvironmentService
+→ gọi queueConfigFactory(env)
+→ cache kết quả trong injector
+→ trả QueueConfig
 ```
 
-Lưu ý thiết kế:
+Cách viết bằng `inject()`:
+
+```ts
+providers: [
+  {
+    provide: QUEUE_CONFIG,
+    useFactory: () => {
+      const env = inject(EnvironmentService);
+
+      return {
+        refreshIntervalMs: env.production ? 10000 : 3000,
+        maxRetry: env.production ? 5 : 1
+      };
+    }
+  }
+]
+```
+
+Dùng khi phụ thuộc:
 
 ```text
-Factory provider không nên chứa quá nhiều business logic.
-Nếu factory quá dài, có thể đang che giấu một service/config design chưa tốt.
+- Environment
+- Runtime config
+- Platform browser/server
+- Feature flag
+- Tenant configuration
+- Existing dependency
 ```
+
+Không nên đặt side effect lớn trong factory:
+
+```text
+- Gọi API
+- Mở WebSocket
+- Tạo subscription dài hạn
+- Ghi dữ liệu
+```
+
+Factory nên tập trung vào việc tạo value/object.
 
 ---
 
-### 4.4. Existing Provider — `useExisting`
+### 5.5. `useExisting`
 
-`useExisting` tạo alias từ token này sang token khác và dùng chung cùng một instance.
-
-Ví dụ:
+Dùng để alias token này sang token khác và giữ cùng instance.
 
 ```ts
 @Injectable()
 export class DefaultLoggerService {
-  log(message: string) {
+  log(message: string): void {
     console.log(message);
   }
 }
@@ -936,13 +1004,16 @@ providers: [
 ]
 ```
 
-Ý nghĩa:
+Kết quả:
 
 ```text
-Ai inject DefaultLoggerService hay LoggerService đều nhận cùng một instance.
+inject(DefaultLoggerService)
+inject(LoggerService)
+
+→ cùng một instance.
 ```
 
-Khác với `useClass`:
+Khác với:
 
 ```ts
 providers: [
@@ -954,44 +1025,53 @@ providers: [
 ]
 ```
 
-Cách này có thể tạo hai instance khác nhau.
+Cách này có thể tạo hai instance:
+
+```text
+Token DefaultLoggerService
+→ instance A.
+
+Token LoggerService
+→ instance B.
+```
 
 Câu chốt:
 
 ```text
-useExisting = alias tới instance đã có.
-useClass = tạo instance theo class được chỉ định.
+useExisting
+→ alias tới instance đã có.
+
+useClass
+→ tạo instance cho token đang provide.
 ```
 
 ---
 
-### 4.5. Multi Provider
+### 5.6. Multi provider
 
-Multi provider cho phép nhiều provider cùng đóng góp vào một token. Angular sẽ trả về array.
-
-Ví dụ:
+Dùng khi nhiều provider cùng đóng góp vào một token.
 
 ```ts
 export interface QueuePlugin {
-  execute(): void;
+  handle(event: QueueEvent): void;
 }
 
 export const QUEUE_PLUGINS =
   new InjectionToken<QueuePlugin[]>('QUEUE_PLUGINS');
 ```
 
-Khai báo:
+Đăng ký:
 
 ```ts
 providers: [
   {
     provide: QUEUE_PLUGINS,
-    useClass: AuditQueuePlugin,
+    useClass: QueueAuditPlugin,
     multi: true
   },
   {
     provide: QUEUE_PLUGINS,
-    useClass: NotifyQueuePlugin,
+    useClass: QueueNotificationPlugin,
     multi: true
   }
 ]
@@ -1000,66 +1080,259 @@ providers: [
 Inject:
 
 ```ts
-constructor(
-  @Inject(QUEUE_PLUGINS) private plugins: QueuePlugin[]
-) {}
+@Injectable()
+export class QueuePluginPipeline {
+  constructor(
+    @Inject(QUEUE_PLUGINS)
+    private readonly plugins: QueuePlugin[]
+  ) {}
+
+  handle(event: QueueEvent): void {
+    for (const plugin of this.plugins) {
+      plugin.handle(event);
+    }
+  }
+}
 ```
 
-Kết quả:
+Phù hợp với:
 
 ```text
-plugins = [
-  AuditQueuePlugin instance,
-  NotifyQueuePlugin instance
-]
+- Plugin architecture
+- Interceptor pipeline
+- Validator list
+- Event handler list
+- Feature extension point
 ```
 
-Dùng cho:
+Nếu thứ tự plugin quan trọng, phải document rõ thứ tự đăng ký hoặc bổ sung priority:
 
-```text
-- Plugin architecture.
-- Interceptor.
-- Validator.
-- Middleware-like processing.
-- Feature extension point.
-```
-
-Lưu ý:
-
-```text
-Nếu thứ tự xử lý quan trọng, cần document rõ thứ tự provider.
+```ts
+export interface QueuePlugin {
+  readonly priority: number;
+  handle(event: QueueEvent): void;
+}
 ```
 
 ---
 
-## 5. InjectionToken
+### 5.7. Bảng chọn Provider
 
-### 5.1. Vì sao cần InjectionToken?
+| Nhu cầu | Provider |
+| --- | --- |
+| Chọn implementation class | `useClass` |
+| Cung cấp value có sẵn | `useValue` |
+| Tạo value bằng logic | `useFactory` |
+| Hai token dùng chung một instance | `useExisting` |
+| Nhiều implementation cùng đóng góp | `multi: true` |
 
-Angular DI cần token tồn tại ở runtime. TypeScript interface không tồn tại ở runtime.
+---
 
-Ví dụ:
+## 6. `InjectionToken`
+
+### 6.1. Vì sao không thể inject trực tiếp TypeScript interface?
+
+Trong Angular DI, mỗi dependency phải có một **token tồn tại ở runtime** để Angular dùng làm key tra cứu provider.
+
+Với class, Angular có thể dùng chính class đó làm token:
+
+```ts
+@Injectable()
+export class PatientQueueApi {}
+```
+
+Inject:
+
+```ts
+constructor(
+  private readonly api: PatientQueueApi
+) {}
+```
+
+Ở đây `PatientQueueApi` vẫn tồn tại sau khi TypeScript được biên dịch sang JavaScript.
+
+Có thể hình dung JavaScript sau khi build vẫn còn:
+
+```js
+class PatientQueueApi {}
+```
+
+Do đó Angular có thể dùng object class `PatientQueueApi` để tìm provider tương ứng.
+
+---
+
+Với interface thì khác.
 
 ```ts
 export interface AppConfig {
   apiUrl: string;
-  enableDebug: boolean;
+  realtimeUrl: string;
 }
 ```
 
-Không thể inject trực tiếp interface:
+Interface chỉ phục vụ việc kiểm tra kiểu trong lúc viết và build code.
+
+Sau khi TypeScript biên dịch sang JavaScript, interface bị loại bỏ hoàn toàn:
 
 ```ts
-constructor(private config: AppConfig) {}
+// TypeScript
+interface AppConfig {
+  apiUrl: string;
+}
 ```
 
-Cách đúng:
+```js
+// JavaScript sau khi build
+// Không còn AppConfig
+```
+
+Cơ chế này được gọi là **type erasure**.
+
+Nói đơn giản:
+
+```text
+Class
+→ còn tồn tại lúc ứng dụng chạy.
+
+Interface
+→ chỉ tồn tại lúc TypeScript kiểm tra kiểu,
+  sau khi build thì biến mất.
+```
+
+Trong khi đó, Angular DI hoạt động lúc ứng dụng đang chạy.
+
+Angular cần thực hiện logic tương tự:
+
+```text
+Consumer cần token X
+→ tìm provider đã đăng ký cho token X
+→ trả dependency tương ứng.
+```
+
+Nếu viết:
 
 ```ts
-export const APP_CONFIG = new InjectionToken<AppConfig>('APP_CONFIG');
+constructor(
+  private readonly config: AppConfig
+) {}
 ```
 
-Provider:
+thì tại runtime Angular không còn thấy `AppConfig`.
+
+Nó chỉ còn biết constructor có một tham số, nhưng không có runtime token để tra provider.
+
+Vì vậy interface không thể được sử dụng trực tiếp làm Angular DI token.
+
+---
+
+Điểm cần phân biệt:
+
+```text
+TypeScript type
+→ dùng để kiểm tra kiểu lúc compile.
+
+Angular DI token
+→ dùng để tìm provider lúc runtime.
+```
+
+Class có thể đóng cả hai vai trò:
+
+```ts
+constructor(
+  private readonly api: PatientQueueApi
+) {}
+```
+
+Trong khi interface chỉ làm được vai trò TypeScript type:
+
+```ts
+constructor(
+  private readonly config: AppConfig
+) {}
+```
+
+Do đó, với interface, Angular cần một object khác tồn tại ở runtime để đại diện cho nó.
+
+Object đó chính là `InjectionToken`.
+
+---
+
+### 6.2. Tạo và sử dụng `InjectionToken`
+
+Giả sử ứng dụng có cấu hình:
+
+```ts
+export interface AppConfig {
+  readonly apiUrl: string;
+  readonly realtimeUrl: string;
+}
+```
+
+`AppConfig` giúp TypeScript kiểm tra cấu trúc dữ liệu, nhưng không thể làm DI token vì nó không tồn tại ở runtime.
+
+Ta tạo một `InjectionToken`:
+
+```ts
+export const APP_CONFIG =
+  new InjectionToken<AppConfig>('APP_CONFIG');
+```
+
+Dòng code này gồm ba phần khác nhau:
+
+```text
+APP_CONFIG
+→ biến chứa token runtime thực sự.
+
+<AppConfig>
+→ kiểu dữ liệu mà token sẽ cung cấp.
+
+'APP_CONFIG'
+→ chuỗi mô tả để debug.
+```
+
+#### Token thật sự là gì?
+
+Token thật sự là object được tạo bởi:
+
+```ts
+new InjectionToken<AppConfig>('APP_CONFIG')
+```
+
+Angular dùng chính object này để so khớp provider và consumer.
+
+Chuỗi `'APP_CONFIG'` chỉ là tên mô tả, giúp thông báo lỗi dễ đọc hơn.
+
+Nó không phải key thực sự.
+
+Ví dụ:
+
+```ts
+const TOKEN_A =
+  new InjectionToken<string>('API_URL');
+
+const TOKEN_B =
+  new InjectionToken<string>('API_URL');
+```
+
+Mặc dù có cùng description:
+
+```text
+API_URL
+```
+
+nhưng đây vẫn là hai token khác nhau:
+
+```ts
+TOKEN_A !== TOKEN_B;
+```
+
+Vì mỗi lần gọi `new InjectionToken()` sẽ tạo một object mới.
+
+---
+
+#### Đăng ký provider cho token
+
+Sau khi có token, cần nói cho Angular biết giá trị nào sẽ được cung cấp khi có code inject `APP_CONFIG`.
 
 ```ts
 providers: [
@@ -1067,966 +1340,392 @@ providers: [
     provide: APP_CONFIG,
     useValue: {
       apiUrl: 'https://api.example.com',
-      enableDebug: false
+      realtimeUrl: 'wss://api.example.com/realtime'
     }
   }
 ]
 ```
 
-Inject:
-
-```ts
-constructor(
-  @Inject(APP_CONFIG) private config: AppConfig
-) {}
-```
-
-Dùng `InjectionToken` khi inject:
+Có thể đọc provider trên như sau:
 
 ```text
-- Interface-like contract.
-- Config object.
-- Primitive value.
-- Array.
-- Function.
-- Plugin list.
+Khi có code yêu cầu token APP_CONFIG,
+hãy trả về object cấu hình này.
 ```
 
 ---
 
-### 5.2. InjectionToken cho config
-
-Ví dụ config app:
+#### Inject bằng constructor
 
 ```ts
-export interface AppConfig {
-  apiUrl: string;
-  enableDebug: boolean;
-  defaultPageSize: number;
-}
+@Injectable()
+export class PatientQueueApi {
+  constructor(
+    @Inject(APP_CONFIG)
+    private readonly config: AppConfig
+  ) {}
 
-export const APP_CONFIG = new InjectionToken<AppConfig>('APP_CONFIG');
-```
-
-Provider:
-
-```ts
-bootstrapApplication(AppComponent, {
-  providers: [
-    {
-      provide: APP_CONFIG,
-      useValue: {
-        apiUrl: environment.apiUrl,
-        enableDebug: !environment.production,
-        defaultPageSize: 20
-      }
-    }
-  ]
-});
-```
-
-Service sử dụng config:
-
-```ts
-@Injectable({ providedIn: 'root' })
-export class PatientApiService {
-  constructor(@Inject(APP_CONFIG) private config: AppConfig) {}
-
-  getPatients() {
-    return this.http.get(`${this.config.apiUrl}/patients`);
+  getRooms() {
+    return fetch(
+      `${this.config.apiUrl}/patient-queue/rooms`
+    );
   }
 }
 ```
 
-Lợi ích:
+Trong đoạn code này:
 
 ```text
-- Không hard-code config trong service.
-- Dễ override khi test.
-- Dễ thay config theo environment.
-- Service phụ thuộc vào contract rõ ràng.
+@Inject(APP_CONFIG)
+→ nói cho Angular biết token cần resolve.
+
+config: AppConfig
+→ nói cho TypeScript biết kiểu dữ liệu của biến config.
+```
+
+Hai phần có vai trò khác nhau.
+
+Angular dùng:
+
+```ts
+APP_CONFIG
+```
+
+để tìm provider.
+
+TypeScript dùng:
+
+```ts
+AppConfig
+```
+
+để kiểm tra kiểu.
+
+---
+
+#### Inject bằng `inject()`
+
+Với cách viết hiện đại:
+
+```ts
+@Injectable()
+export class PatientQueueApi {
+  private readonly config =
+    inject(APP_CONFIG);
+
+  getRooms() {
+    return fetch(
+      `${this.config.apiUrl}/patient-queue/rooms`
+    );
+  }
+}
+```
+
+Vì `APP_CONFIG` đã được khai báo là:
+
+```ts
+InjectionToken<AppConfig>
+```
+
+nên TypeScript tự suy ra:
+
+```ts
+this.config
+```
+
+có kiểu `AppConfig`.
+
+Do đó không cần viết thêm:
+
+```ts
+@Inject(APP_CONFIG)
 ```
 
 ---
 
-### 5.3. Lỗi hay gặp với InjectionToken
+#### Luồng resolve hoàn chỉnh
 
-Sai:
+Khi Angular tạo `PatientQueueApi`:
 
-```ts
-export const TOKEN_A = new InjectionToken<string>('API_URL');
-export const TOKEN_B = new InjectionToken<string>('API_URL');
+```text
+1. Angular thấy PatientQueueApi cần APP_CONFIG.
+2. APP_CONFIG được dùng làm runtime token.
+3. Angular tìm provider của APP_CONFIG trong injector tree.
+4. Provider dùng useValue để trả object cấu hình.
+5. Object được truyền vào PatientQueueApi.
+6. TypeScript đảm bảo object đó có cấu trúc AppConfig.
 ```
 
-Dù description đều là `'API_URL'`, đây vẫn là hai object khác nhau.
+Mental model:
+
+```text
+AppConfig
+→ chỉ là contract về kiểu.
+
+APP_CONFIG
+→ runtime token để Angular tìm provider.
+
+Provider
+→ giá trị thực tế được trả về.
+```
+
+---
+
+#### Khi nào cần dùng `InjectionToken`?
+
+Dùng `InjectionToken` khi dependency không có class runtime để làm token:
+
+```text
+- Interface
+- Config object
+- String
+- Number
+- Boolean
+- Function
+- Array
+- Plugin list
+- Browser API abstraction
+```
+
+Ví dụ primitive:
+
+```ts
+export const API_BASE_URL =
+  new InjectionToken<string>('API_BASE_URL');
+```
+
+```ts
+providers: [
+  {
+    provide: API_BASE_URL,
+    useValue: 'https://api.example.com'
+  }
+]
+```
+
+```ts
+private readonly apiBaseUrl =
+  inject(API_BASE_URL);
+```
+
+Ví dụ function:
+
+```ts
+export type QueueIdGenerator = () => string;
+
+export const QUEUE_ID_GENERATOR =
+  new InjectionToken<QueueIdGenerator>(
+    'QUEUE_ID_GENERATOR'
+  );
+```
+
+```ts
+providers: [
+  {
+    provide: QUEUE_ID_GENERATOR,
+    useValue: () => crypto.randomUUID()
+  }
+]
+```
+
+---
+
+Câu chốt:
+
+```text
+Interface mô tả dependency có hình dạng như thế nào.
+
+InjectionToken đại diện cho dependency đó tại runtime.
+
+Provider quyết định giá trị thực tế nào được trả về khi token được inject.
+```
+
+---
+
+### 6.3. Token identity
+
+Hai token có cùng description vẫn khác nhau.
+
+```ts
+const TOKEN_A = new InjectionToken<string>('API_URL');
+const TOKEN_B = new InjectionToken<string>('API_URL');
+```
 
 ```text
 TOKEN_A !== TOKEN_B
 ```
 
-Nếu provider dùng `TOKEN_A` nhưng inject `TOKEN_B`, Angular sẽ báo không tìm thấy provider.
+Nếu provide `TOKEN_A` nhưng inject `TOKEN_B`, Angular báo không có provider.
 
 Rule:
 
 ```text
-InjectionToken phải được export từ một nơi dùng chung.
-Không tạo lại token mới ở nhiều file khác nhau.
+Một token phải được định nghĩa và export từ một nơi duy nhất.
+Không tạo lại token theo description ở nhiều file.
 ```
 
 ---
 
-## 6. Angular DI trong ứng dụng hiện đại
-
-### 6.1. Constructor injection
-
-Cách truyền thống:
+### 6.4. Default provider của token
 
 ```ts
-@Injectable()
-export class QueueFacade {
-  constructor(
-    private api: QueueApi,
-    private toast: ToastService
-  ) {}
-}
+export const QUEUE_CONFIG =
+  new InjectionToken<QueueConfig>('QUEUE_CONFIG', {
+    providedIn: 'root',
+    factory: () => ({
+      refreshIntervalMs: 5000,
+      maxRetry: 3
+    })
+  });
 ```
 
-Ưu điểm:
+Token có thể tự cung cấp default value ở root.
 
-```text
-- Nhìn constructor là biết class phụ thuộc vào những gì.
-- Dễ review dependency của class.
-- Phù hợp với service/facade có dependency rõ ràng.
-```
-
----
-
-### 6.2. `inject()`
-
-Angular hiện đại hỗ trợ `inject()`:
+Factory có thể inject dependency:
 
 ```ts
-@Injectable()
-export class QueueFacade {
-  private api = inject(QueueApi);
-  private toast = inject(ToastService);
-}
-```
+export const QUEUE_CONFIG =
+  new InjectionToken<QueueConfig>('QUEUE_CONFIG', {
+    providedIn: 'root',
+    factory: () => {
+      const env = inject(EnvironmentService);
 
-`inject()` rất tiện trong:
-
-```text
-- Functional guard.
-- Functional interceptor.
-- Factory provider.
-- Field initializer.
-- Standalone APIs.
-```
-
-Ví dụ functional interceptor:
-
-```ts
-export const authInterceptor: HttpInterceptorFn = (req, next) => {
-  const tokenService = inject(TokenService);
-
-  const token = tokenService.getToken();
-
-  const authReq = req.clone({
-    setHeaders: {
-      Authorization: `Bearer ${token}`
+      return {
+        refreshIntervalMs: env.production ? 10000 : 3000,
+        maxRetry: 3
+      };
     }
   });
-
-  return next(authReq);
-};
 ```
 
-Lưu ý:
+Provider tại route/component vẫn có thể override default value.
 
-```ts
-function helper() {
-  const api = inject(QueueApi); // có thể lỗi nếu không ở injection context
-}
-```
+---
 
-`inject()` chỉ dùng được trong injection context hợp lệ.
-
-Cách nghĩ:
+### 6.5. Khi nào nên dùng `InjectionToken`?
 
 ```text
-Constructor injection giúp nhìn dependency rõ hơn.
-inject() tiện nhưng nếu lạm dụng, dependency của class bị rải rác và khó review.
+- Interface-like contract
+- Primitive value
+- Configuration object
+- Function
+- Array/plugin list
+- Browser global abstraction
+- Optional capability
 ```
 
----
-
-### 6.3. Resolution modifiers
-
-Resolution modifiers giúp kiểm soát cách Angular tìm provider trong injector tree.
-
-#### 6.3.1. `@Optional()`
+Ví dụ function:
 
 ```ts
-constructor(
-  @Optional() private logger?: LoggerService
-) {}
-```
+export type QueueIdGenerator = () => string;
 
-Nếu không có provider, Angular không throw lỗi mà trả `null`.
-
-Dùng khi dependency không bắt buộc.
-
-#### 6.3.2. `@Self()`
-
-```ts
-constructor(
-  @Self() private control: NgControl
-) {}
-```
-
-Chỉ tìm provider ở injector hiện tại, không đi lên cha.
-
-Dùng khi muốn chắc chắn dependency phải nằm cùng element/component/directive.
-
-#### 6.3.3. `@SkipSelf()`
-
-```ts
-constructor(
-  @SkipSelf() private parentForm: ControlContainer
-) {}
-```
-
-Bỏ qua injector hiện tại, bắt đầu tìm từ injector cha.
-
-Dùng khi component/directive con muốn lấy context từ cha.
-
-#### 6.3.4. `@Host()`
-
-Giới hạn phạm vi tìm kiếm trong host boundary.
-
-Dùng ít hơn, thường gặp trong directive/component composition nâng cao.
-
----
-
-### 6.4. DI với HTTP Interceptor
-
-Interceptor là ví dụ điển hình của DI và pipeline.
-
-Functional interceptor:
-
-```ts
-export const authInterceptor: HttpInterceptorFn = (req, next) => {
-  const tokenService = inject(TokenService);
-  const token = tokenService.getToken();
-
-  return next(
-    req.clone({
-      setHeaders: {
-        Authorization: `Bearer ${token}`
-      }
-    })
-  );
-};
+export const QUEUE_ID_GENERATOR =
+  new InjectionToken<QueueIdGenerator>('QUEUE_ID_GENERATOR');
 ```
 
 Provider:
 
 ```ts
-bootstrapApplication(AppComponent, {
-  providers: [
-    provideHttpClient(
-      withInterceptors([authInterceptor])
-    )
-  ]
-});
-```
-
-Điểm cần nhớ:
-
-```text
-Interceptor được đăng ký ở injector nào thì dependency của nó được resolve theo context injector đó.
-```
-
-Bug có thể gặp:
-
-```text
-- TokenService bị provide lại ở feature, interceptor vẫn dùng root TokenService.
-- Auth state có nhiều instance làm header lấy sai token.
-- Interceptor phụ thuộc service có side effect quá nặng.
-```
-
----
-
-### 6.5. DI trong standalone Angular
-
-Standalone app thường cấu hình provider tại `bootstrapApplication`:
-
-```ts
-bootstrapApplication(AppComponent, {
-  providers: [
-    provideHttpClient(),
-    provideRouter(routes),
-    {
-      provide: API_BASE_URL,
-      useValue: environment.apiUrl
-    }
-  ]
-});
-```
-
-Provider ở đây là app-wide/root-level.
-
-Route-level provider:
-
-```ts
-export const routes: Routes = [
-  {
-    path: 'patient-queue',
-    providers: [
-      PatientQueueFacade,
-      PatientQueueState
-    ],
-    loadComponent: () =>
-      import('./patient-queue.page').then(m => m.PatientQueuePage)
-  }
-];
-```
-
-Component-level provider:
-
-```ts
-@Component({
-  standalone: true,
-  selector: 'app-room-filter',
-  providers: [RoomFilterState],
-  templateUrl: './room-filter.component.html'
-})
-export class RoomFilterComponent {}
-```
-
-Tư duy phân tầng:
-
-```text
-bootstrap providers → app-wide.
-route providers     → feature/route-wide.
-component providers → local subtree.
-```
-
----
-
-### 6.6. DI trong NgModule Angular cũ
-
-Trong Angular dùng NgModule:
-
-```ts
-@NgModule({
-  declarations: [AppComponent],
-  imports: [BrowserModule],
-  providers: [
-    AuthService,
-    PermissionService
-  ],
-  bootstrap: [AppComponent]
-})
-export class AppModule {}
-```
-
-Feature module:
-
-```ts
-@NgModule({
-  providers: [PatientQueueFacade]
-})
-export class PatientQueueModule {}
-```
-
-Cẩn thận với `SharedModule`.
-
-Sai phổ biến:
-
-```ts
-@NgModule({
-  declarations: [SharedButtonComponent],
-  exports: [SharedButtonComponent],
-  providers: [SomeStateService]
-})
-export class SharedModule {}
-```
-
-Rule thực tế:
-
-```text
-SharedModule chỉ nên chứa component/directive/pipe dùng chung.
-Không nên chứa stateful provider.
-```
-
-Nếu `SharedModule` được import nhiều nơi, provider trong đó có thể gây hiểu nhầm hoặc tạo scope không như mong muốn.
-
----
-
-## 7. DI và State Management
-
-### 7.1. DI không phải state management library
-
-DI không phải state management library, nhưng Angular service thường được dùng để giữ state bằng RxJS hoặc Signals.
-
-Điểm quan trọng:
-
-```text
-State đặt trong service sẽ có lifetime theo provider scope của service đó.
-```
-
-Nói cách khác:
-
-```text
-State bằng RxJS hay Signal đều không tự quyết định sống bao lâu.
-DI scope mới quyết định service chứa state đó sống bao lâu.
-```
-
----
-
-### 7.2. State service với RxJS
-
-Ví dụ:
-
-```ts
-@Injectable()
-export class PatientQueueState {
-  private roomsSubject = new BehaviorSubject<RoomQueueVm[]>([]);
-  rooms$ = this.roomsSubject.asObservable();
-
-  setRooms(rooms: RoomQueueVm[]) {
-    this.roomsSubject.next(rooms);
-  }
+{
+  provide: QUEUE_ID_GENERATOR,
+  useValue: () => crypto.randomUUID()
 }
 ```
 
-Nếu state provide ở root:
+---
+
+## 7. Injector Hierarchy, Scope và Lifecycle
+
+### 7.1. Scope là gì?
+
+Scope là phạm vi mà một provider có hiệu lực.
+
+Scope quyết định:
 
 ```text
-State sống theo app.
-```
-
-Nếu state provide ở route:
-
-```text
-State sống theo feature/route.
-```
-
-Nếu state provide ở component:
-
-```text
-State sống theo component subtree.
+- Consumer nào nhìn thấy provider.
+- Bao nhiêu instance được tạo.
+- Instance được dùng chung với ai.
+- State sống bao lâu.
+- Resource cleanup ở thời điểm nào.
 ```
 
 ---
 
-### 7.3. State service với Signals
-
-Ví dụ:
+### 7.2. Root scope
 
 ```ts
-@Injectable()
-export class PatientQueueState {
-  private readonly roomsSignal = signal<RoomQueueVm[]>([]);
-  readonly rooms = this.roomsSignal.asReadonly();
-
-  setRooms(rooms: RoomQueueVm[]) {
-    this.roomsSignal.set(rooms);
-  }
-}
-```
-
-Cách nghĩ vẫn giống RxJS:
-
-```text
-Signal nằm trong service.
-Service sống theo provider scope.
-Vậy signal state cũng sống theo provider scope.
-```
-
----
-
-### 7.4. State service nên sống ở đâu?
-
-Câu hỏi không phải là:
-
-```text
-Có inject được không?
-```
-
-Câu hỏi đúng là:
-
-```text
-State này thuộc app, feature hay component?
-```
-
-Nếu là trạng thái đăng nhập:
-
-```ts
-@Injectable({ providedIn: 'root' })
-export class AuthState {}
-```
-
-Nếu là state màn hàng chờ:
-
-```ts
-export const routes: Routes = [
-  {
-    path: 'patient-queue',
-    providers: [PatientQueueState],
-    loadComponent: () => import('./patient-queue.page').then(m => m.PatientQueuePage)
-  }
-];
-```
-
-Nếu là state của từng modal:
-
-```ts
-@Component({
-  providers: [CreatePatientModalState]
+@Injectable({
+  providedIn: 'root'
 })
-export class CreatePatientModalComponent {}
+export class CurrentUserService {}
 ```
 
-Ghi nhớ:
+Đặc điểm:
 
 ```text
-DI scope quyết định lifetime của state.
-State lifetime sai thì bug rất khó nhìn bằng UI.
+- Một provider trong root injector.
+- Dùng chung trong application instance.
+- Thường sống đến khi app bị destroy/reload.
 ```
 
----
-
-## 8. Tư duy thiết kế service với DI
-
-### 8.1. DI không chỉ để inject service
-
-Ở mức cơ bản, DI thường được hiểu là:
+Phù hợp với:
 
 ```text
-Muốn dùng service thì inject vào constructor.
-```
-
-Khi thiết kế hoặc review code, DI là công cụ để trả lời:
-
-```text
-- Object này sống bao lâu?
-- Có bao nhiêu instance?
-- State này dùng chung hay riêng?
-- Có cần reset khi rời route không?
-- Dependency này là contract hay implementation cụ thể?
-- Có thể mock dễ trong test không?
-- Có làm service bị phụ thuộc vòng tròn không?
-- Có đang giấu quá nhiều trách nhiệm trong một service không?
-```
-
-Nói cách khác:
-
-```text
-DI là công cụ kiểm soát dependency, scope, lifecycle, testability và architecture.
-```
-
----
-
-### 8.2. Không nên có một service khổng lồ
-
-Không nên có một service ôm quá nhiều trách nhiệm:
-
-```ts
-@Injectable({ providedIn: 'root' })
-export class PatientQueueService {
-  // gọi API
-  // giữ state
-  // subscribe websocket
-  // xử lý permission
-  // transform DTO
-  // show toast
-  // navigate
-}
-```
-
-Vấn đề:
-
-```text
-- Khó test.
-- Khó đổi implementation.
-- Khó kiểm soát lifecycle.
-- Dễ circular dependency.
-- Component phụ thuộc vào service quá lớn.
-- Một thay đổi nhỏ ảnh hưởng nhiều use case.
-```
-
----
-
-### 8.3. Tách service theo trách nhiệm
-
-Nên tách trách nhiệm:
-
-```text
-PatientQueueApi
-→ chỉ gọi HTTP/API.
-
-PatientQueueState
-→ giữ state.
-
-PatientQueueRealtimeHandler
-→ nhận websocket event và update state.
-
-PatientQueueFacade
-→ phối hợp use case cho component.
-
-PatientQueueMapper
-→ map DTO sang ViewModel.
-```
-
-Ví dụ:
-
-```ts
-@Injectable()
-export class PatientQueueFacade {
-  private api = inject(PatientQueueApi);
-  private state = inject(PatientQueueState);
-  private realtime = inject(PatientQueueRealtimeHandler);
-
-  readonly vm$ = this.state.vm$;
-
-  load(roomId: number) {
-    return this.api.getQueue(roomId).pipe(
-      tap(queue => this.state.setQueue(queue))
-    );
-  }
-
-  connectRealtime() {
-    this.realtime.listen();
-  }
-}
-```
-
-Component chỉ còn:
-
-```ts
-@Component({
-  selector: 'app-patient-queue',
-  templateUrl: './patient-queue.page.html'
-})
-export class PatientQueuePage {
-  facade = inject(PatientQueueFacade);
-  vm$ = this.facade.vm$;
-
-  ngOnInit() {
-    this.facade.connectRealtime();
-  }
-}
-```
-
-Tư duy tốt:
-
-```text
-Component mỏng.
-Service có trách nhiệm rõ.
-Facade gom use case cho UI.
-DI scope quyết định vòng đời.
-```
-
----
-
-### 8.4. Facade nên provide ở đâu?
-
-Facade thường phục vụ một màn hình hoặc một feature, nên không phải lúc nào cũng nên để root.
-
-Nếu facade phục vụ toàn app:
-
-```ts
-@Injectable({ providedIn: 'root' })
-export class AppSessionFacade {}
-```
-
-Nếu facade phục vụ một feature:
-
-```ts
-export const routes: Routes = [
-  {
-    path: 'patient-queue',
-    providers: [PatientQueueFacade],
-    loadComponent: () => import('./patient-queue.page').then(m => m.PatientQueuePage)
-  }
-];
-```
-
-Nếu facade phục vụ một component instance:
-
-```ts
-@Component({
-  providers: [CreateOrderWizardFacade]
-})
-export class CreateOrderWizardComponent {}
-```
-
-Rule:
-
-```text
-Facade sống theo phạm vi use case mà nó phục vụ.
-```
-
----
-
-## 9. Case Studies
-
-### 9.1. Case Study 1 — Hàng chờ khám bệnh realtime
-
-#### Bài toán
-
-```text
-Màn hình theo dõi hàng chờ khám bệnh.
-Có nhiều phòng khám.
-Mỗi phòng có số đang khám, số đang chờ, trạng thái lượt khám.
-Dữ liệu ban đầu lấy từ API.
-Sau đó cập nhật realtime qua websocket.
-Có filter theo phòng/khoa/trạng thái.
-Có modal xem chi tiết bệnh nhân.
-```
-
-#### Thiết kế DI đề xuất
-
-```text
-Root scope:
-- AuthService
-- CurrentTenantService
+- CurrentUserService
 - PermissionService
-- WebSocketConnectionService
 - AppConfigService
-
-Route/Feature scope:
-- PatientQueueFacade
-- PatientQueueApi
-- PatientQueueState
-- PatientQueueRealtimeHandler
-- PatientQueueMapper
-
-Component scope:
-- RoomFilterState
-- LocalTableSelectionState
-- PatientDetailModalState
+- LoggerService
+- Global notification service
+- Physical WebSocket connection
 ```
 
-#### Lý do chọn scope
+Rủi ro:
 
 ```text
-WebSocketConnectionService ở root vì connection dùng chung toàn app.
-PatientQueueRealtimeHandler ở route vì chỉ xử lý event cho màn hàng chờ.
-PatientQueueState ở route vì rời màn nên reset state.
-RoomFilterState ở component vì mỗi filter component có state riêng.
-```
-
-#### Nếu chọn sai scope
-
-```text
-Đưa PatientQueueState lên root
-→ rời màn quay lại vẫn giữ filter/data cũ ngoài ý muốn.
-
-Provide WebSocketConnectionService ở component
-→ mỗi lần mở màn tạo connection mới.
-
-Provide QueueStateService ở nhiều component khác nhau
-→ set data chỗ này, chỗ kia không nhận.
+- Feature state không reset.
+- Object lớn bị giữ quá lâu.
+- Subscription global không cleanup.
+- State tenant/user cũ bị giữ khi đổi context.
 ```
 
 ---
 
-### 9.2. Case Study 2 — Set data trong service rồi component khác không nhận
-
-#### Bối cảnh
-
-Có service giữ state:
+### 7.3. Route scope
 
 ```ts
-@Injectable({
-  providedIn: 'root'
-})
-export class QueueStateService {
-  private selectedRoomIdSubject = new BehaviorSubject<number | null>(null);
-  selectedRoomId$ = this.selectedRoomIdSubject.asObservable();
-
-  selectRoom(roomId: number) {
-    this.selectedRoomIdSubject.next(roomId);
-  }
+{
+  path: 'patient-queue',
+  providers: [
+    PatientQueueState,
+    PatientQueueFacade
+  ]
 }
 ```
 
-`RoomListComponent` set room:
-
-```ts
-this.queueState.selectRoom(10);
-```
-
-`RoomDetailComponent` subscribe:
-
-```ts
-this.queueState.selectedRoomId$.subscribe(...);
-```
-
-Nếu cả hai cùng dùng root instance thì hoạt động bình thường.
-
-#### Nguyên nhân bug
-
-Nếu vô tình khai báo:
-
-```ts
-@Component({
-  selector: 'app-room-list',
-  providers: [QueueStateService],
-  templateUrl: './room-list.component.html'
-})
-export class RoomListComponent {}
-```
-
-thì `RoomListComponent` dùng instance riêng, còn `RoomDetailComponent` có thể đang dùng root instance.
-
-Kết quả:
+Đặc điểm:
 
 ```text
-RoomList set data vào instance B.
-RoomDetail nghe data từ instance A.
-Hai bên không gặp nhau.
+- Dùng chung trong route subtree.
+- Tách biệt với route khác.
+- Phù hợp với feature lifecycle.
 ```
 
-#### Dấu hiệu nhận biết
+Phù hợp với:
 
 ```text
-- Subject emit nhưng component khác không nhận.
-- Cache tưởng đã set nhưng nơi khác lại undefined.
-- Console log thấy constructor service chạy nhiều lần.
+- Feature state
+- Feature facade
+- Feature workflow
+- Feature cache
+- Realtime handler theo màn hình
 ```
 
-#### Cách debug
-
-```ts
-@Injectable({
-  providedIn: 'root'
-})
-export class QueueStateService {
-  private id = Math.random();
-
-  constructor() {
-    console.log('QueueStateService instance:', this.id);
-  }
-}
-```
-
-Nếu log nhiều instance ngoài ý muốn, cần kiểm tra provider scope.
+Route scope thường là lựa chọn tốt hơn root cho state màn hình.
 
 ---
 
-### 9.3. Case Study 3 — WebSocket bị mở nhiều connection
-
-#### Bối cảnh
-
-Một service quản lý websocket:
-
-```ts
-@Injectable()
-export class WebSocketConnectionService {
-  connect() {
-    // open websocket connection
-  }
-}
-```
-
-Nếu service này bị provide ở component:
-
-```ts
-@Component({
-  providers: [WebSocketConnectionService]
-})
-export class PatientQueuePage {}
-```
-
-mỗi lần component được tạo, Angular có thể tạo một instance mới của `WebSocketConnectionService`.
-
-#### Hậu quả
-
-```text
-- Mở nhiều websocket connection.
-- Server nhận nhiều subscription trùng.
-- Client nhận duplicate event.
-- Khó cleanup vì mỗi instance quản lý connection riêng.
-```
-
-#### Thiết kế tốt hơn
-
-```text
-Root scope:
-- WebSocketConnectionService quản lý connection chung.
-
-Route/Feature scope:
-- PatientQueueRealtimeHandler subscribe/unsubscribe event cho feature.
-```
-
-Ví dụ:
-
-```ts
-@Injectable({ providedIn: 'root' })
-export class WebSocketConnectionService {}
-```
-
-```ts
-export const routes: Routes = [
-  {
-    path: 'patient-queue',
-    providers: [PatientQueueRealtimeHandler],
-    loadComponent: () => import('./patient-queue.page').then(m => m.PatientQueuePage)
-  }
-];
-```
-
----
-
-### 9.4. Case Study 4 — Filter không reset khi rời màn hình
-
-#### Bối cảnh
-
-Có state lưu filter:
-
-```ts
-@Injectable({ providedIn: 'root' })
-export class PatientQueueFilterState {
-  keyword = '';
-  roomId?: number;
-}
-```
-
-Người dùng vào màn hàng chờ, chọn filter. Sau đó rời màn, quay lại vẫn thấy filter cũ.
-
-#### Có thể đúng hoặc sai tùy nghiệp vụ
-
-Nếu yêu cầu là giữ filter khi quay lại:
-
-```text
-Root hoặc cache strategy có thể phù hợp.
-```
-
-Nếu yêu cầu là vào màn phải reset filter:
-
-```text
-Root scope là chưa phù hợp.
-```
-
-#### Thiết kế đề xuất
-
-Nếu filter thuộc màn hàng chờ:
-
-```ts
-export const routes: Routes = [
-  {
-    path: 'patient-queue',
-    providers: [PatientQueueFilterState],
-    loadComponent: () => import('./patient-queue.page').then(m => m.PatientQueuePage)
-  }
-];
-```
-
-Nếu mỗi filter component cần state riêng:
+### 7.4. Component scope
 
 ```ts
 @Component({
@@ -2035,475 +1734,1929 @@ Nếu mỗi filter component cần state riêng:
 export class RoomFilterComponent {}
 ```
 
----
+Mỗi component instance có injector riêng.
 
-### 9.5. Case Study 5 — AuthService và PermissionService bị circular dependency
+Nếu template render:
 
-#### Bối cảnh
-
-```ts
-@Injectable()
-export class AuthService {
-  constructor(private permissionService: PermissionService) {}
-}
-
-@Injectable()
-export class PermissionService {
-  constructor(private authService: AuthService) {}
-}
+```html
+<app-room-filter></app-room-filter>
+<app-room-filter></app-room-filter>
+<app-room-filter></app-room-filter>
 ```
 
-Đây là mùi thiết kế.
-
-#### Vấn đề
+thì có:
 
 ```text
-AuthService biết quá nhiều về PermissionService.
-PermissionService lại biết quá nhiều về AuthService.
-Hai service khó test độc lập.
-Dễ phát sinh lỗi runtime hoặc init order khó hiểu.
+RoomFilterState instance A
+RoomFilterState instance B
+RoomFilterState instance C
 ```
 
-#### Cách refactor
+Phù hợp với state độc lập theo instance.
 
-Tách state chung:
+---
+
+### 7.5. Resolution từ gần đến xa
+
+Giả sử:
+
+```text
+Root Injector
+└── Route Injector
+    └── Parent Component Injector
+        └── Child Component Injector
+```
+
+Child cần token `QueueState`.
+
+Angular tìm:
+
+```text
+1. Child component injector
+2. Parent component injector
+3. Route injector
+4. Root injector
+```
+
+Provider gần nhất thắng.
+
+---
+
+### 7.6. Shadowing provider
+
+Root có:
 
 ```ts
-@Injectable({ providedIn: 'root' })
-export class AuthState {
-  private userSubject = new BehaviorSubject<User | null>(null);
-  user$ = this.userSubject.asObservable();
+@Injectable({
+  providedIn: 'root'
+})
+export class SelectedRoomState {}
+```
 
-  setUser(user: User | null) {
-    this.userSubject.next(user);
+Component khai báo lại:
+
+```ts
+@Component({
+  providers: [SelectedRoomState]
+})
+export class RoomListComponent {}
+```
+
+Khi đó:
+
+```text
+RoomListComponent
+→ dùng instance component.
+
+Component khác ngoài subtree
+→ dùng instance root.
+```
+
+Đây là nguyên nhân điển hình của lỗi:
+
+```text
+Service đã set dữ liệu nhưng component khác không nhận.
+```
+
+Thực tế hai component đang sử dụng hai instance khác nhau.
+
+---
+
+### 7.7. Lazy loading
+
+Với kiến trúc NgModule cũ:
+
+```ts
+@NgModule({
+  providers: [FeatureStateService]
+})
+export class PatientQueueModule {}
+```
+
+Nếu module lazy-loaded, provider thuộc lazy injector.
+
+Điều này đúng với feature state, nhưng sai nếu vô tình provide lại service global:
+
+```text
+- AuthService
+- CurrentUserService
+- PermissionService
+- WebSocketConnectionService
+```
+
+Hậu quả có thể là:
+
+```text
+- Auth state tách đôi.
+- Permission cache không đồng bộ.
+- WebSocket mở nhiều connection.
+- Interceptor dùng token khác component.
+```
+
+---
+
+### 7.8. `providedIn: 'root'` không phải singleton tuyệt đối
+
+Câu nói:
+
+```text
+providedIn: 'root' = singleton.
+```
+
+chỉ đúng trong phạm vi đơn giản.
+
+Cách hiểu chính xác:
+
+```text
+Provider mặc định được đăng ký ở root injector.
+Root injector cache một instance cho provider đó.
+```
+
+Nhưng có thể có instance khác nếu:
+
+```text
+- Token bị provide lại ở route.
+- Token bị provide lại ở component.
+- Có nhiều Angular application bootstrap trên cùng page.
+- Có platform-level/environment injector đặc biệt.
+```
+
+Do đó khi debug, phải kiểm tra **cây provider thực tế**, không chỉ nhìn `providedIn`.
+
+---
+
+### 7.9. Scope quyết định lifecycle của state
+
+```ts
+@Injectable()
+export class PatientQueueState {
+  readonly rooms = signal<RoomQueueVm[]>([]);
+}
+```
+
+Signal không tự biết state nên sống bao lâu.
+
+Nếu service ở root:
+
+```text
+rooms sống theo app.
+```
+
+Nếu service ở route:
+
+```text
+rooms sống theo feature route.
+```
+
+Nếu service ở component:
+
+```text
+rooms sống theo component instance.
+```
+
+Điều này áp dụng tương tự với:
+
+```text
+- BehaviorSubject
+- ReplaySubject
+- Signal
+- Local cache
+- Selected item
+- Filter
+- Form state
+```
+
+---
+
+### 7.10. Scope và resource
+
+Service có thể sở hữu resource:
+
+```text
+- WebSocket
+- Timer
+- DOM listener
+- BroadcastChannel
+- IndexedDB transaction
+- Long-lived subscription
+```
+
+Scope phải phù hợp với resource.
+
+Ví dụ:
+
+```text
+Physical WebSocket connection
+→ root.
+
+Feature-specific WebSocket subscription
+→ route/component.
+
+Polling chỉ khi modal mở
+→ component.
+
+App-wide online/offline listener
+→ root.
+```
+
+---
+
+## 8. Cách inject dependency
+
+### 8.1. Constructor injection
+
+```ts
+@Injectable()
+export class PatientQueueFacade {
+  constructor(
+    private readonly api: PatientQueueApi,
+    private readonly state: PatientQueueState
+  ) {}
+}
+```
+
+Ưu điểm:
+
+```text
+- Dependency tập trung ở constructor.
+- Dễ nhìn dependency graph.
+- Phù hợp với class thuần.
+- Dễ tạo class trực tiếp trong unit test.
+```
+
+Nhược điểm:
+
+```text
+- Constructor dài nếu class có quá nhiều dependency.
+```
+
+Constructor dài thường không phải lỗi của DI, mà là tín hiệu class đang ôm quá nhiều trách nhiệm.
+
+---
+
+### 8.2. `inject()`
+
+```ts
+@Injectable()
+export class PatientQueueFacade {
+  private readonly api = inject(PatientQueueApi);
+  private readonly state = inject(PatientQueueState);
+}
+```
+
+Phù hợp với:
+
+```text
+- Functional guard
+- Functional interceptor
+- Provider factory
+- Field initializer
+- Helper được tạo trong injection context
+```
+
+Ví dụ interceptor:
+
+```ts
+export const authInterceptor: HttpInterceptorFn = (
+  request,
+  next
+) => {
+  const tokenService = inject(TokenService);
+  const token = tokenService.getToken();
+
+  return next(
+    request.clone({
+      setHeaders: {
+        Authorization: `Bearer ${token}`
+      }
+    })
+  );
+};
+```
+
+---
+
+### 8.3. Injection context
+
+`inject()` chỉ hoạt động trong injection context hợp lệ.
+
+Hợp lệ:
+
+```text
+- Constructor/factory do Angular gọi.
+- Class field initializer của object do Angular tạo.
+- Provider factory.
+- Functional guard/interceptor.
+- runInInjectionContext().
+```
+
+Không hợp lệ:
+
+```ts
+export function calculateQueue(): void {
+  const api = inject(PatientQueueApi);
+}
+```
+
+Nếu function được gọi như function thông thường, Angular không biết injector hiện tại là gì.
+
+Thiết kế tốt hơn:
+
+```ts
+export function calculateQueue(
+  api: PatientQueueApi
+): void {
+  // pure logic
+}
+```
+
+Hoặc inject ở boundary rồi truyền dependency xuống.
+
+---
+
+### 8.4. `runInInjectionContext`
+
+Trong trường hợp framework/library cần chạy function trong injector cụ thể:
+
+```ts
+runInInjectionContext(injector, () => {
+  const service = inject(PatientQueueService);
+  service.load();
+});
+```
+
+Không nên dùng để thay thế constructor injection trong application code thông thường.
+
+---
+
+### 8.5. Resolution modifiers
+
+#### `optional`
+
+Cách hiện đại:
+
+```ts
+const logger = inject(LoggerService, {
+  optional: true
+});
+```
+
+Khi không có provider:
+
+```text
+logger = null
+```
+
+Dùng khi capability thực sự optional.
+
+Không nên dùng optional để che lỗi cấu hình provider bắt buộc.
+
+---
+
+#### `self`
+
+```ts
+const control = inject(NgControl, {
+  self: true
+});
+```
+
+Chỉ tìm tại injector hiện tại.
+
+Phù hợp khi directive yêu cầu provider nằm trên cùng element.
+
+---
+
+#### `skipSelf`
+
+```ts
+const parentContainer = inject(ControlContainer, {
+  skipSelf: true
+});
+```
+
+Bỏ qua injector hiện tại và tìm từ cha.
+
+Phù hợp với nested form hoặc context từ parent.
+
+---
+
+#### `host`
+
+Giới hạn lookup theo host boundary.
+
+Thường dùng trong directive/component composition nâng cao. Khi dùng phải hiểu rõ host boundary, tránh dùng theo thử-sai.
+
+---
+
+## 9. Thiết kế service và state với DI
+
+### 9.1. DI không tự đảm bảo Single Responsibility
+
+Một service vẫn có thể phình to dù dùng DI.
+
+```ts
+@Injectable()
+export class PatientQueueService {
+  // gọi HTTP
+  // giữ state
+  // nghe WebSocket
+  // map DTO
+  // kiểm tra quyền
+  // show toast
+  // điều hướng
+}
+```
+
+DI chỉ giúp tạo và cung cấp object. Việc chia trách nhiệm vẫn là quyết định thiết kế.
+
+---
+
+### 9.2. Tách service theo vai trò
+
+Một feature có thể tách thành:
+
+```text
+PatientQueueApi
+→ giao tiếp HTTP.
+
+PatientQueueState
+→ giữ state và state transition.
+
+PatientQueueRealtimeHandler
+→ map realtime event thành state update.
+
+PatientQueueMapper
+→ map DTO thành ViewModel.
+
+PatientQueueFacade
+→ expose use case cho component.
+```
+
+---
+
+### 9.3. API service
+
+```ts
+@Injectable()
+export class PatientQueueApi {
+  private readonly http = inject(HttpClient);
+
+  getRooms(): Observable<RoomQueueDto[]> {
+    return this.http.get<RoomQueueDto[]>(
+      '/api/patient-queue/rooms'
+    );
   }
 }
 ```
 
-AuthService phụ trách login/logout/load session:
+API service nên tập trung vào:
+
+```text
+- Endpoint
+- Request/response type
+- Query parameter
+- HTTP concern cụ thể
+```
+
+Không nên giữ UI state hoặc trực tiếp show toast.
+
+---
+
+### 9.4. State service với Signal
 
 ```ts
-@Injectable({ providedIn: 'root' })
-export class AuthService {
-  constructor(private authState: AuthState) {}
+@Injectable()
+export class PatientQueueState {
+  private readonly roomsState =
+    signal<RoomQueueVm[]>([]);
+
+  private readonly loadingState =
+    signal(false);
+
+  private readonly errorState =
+    signal<string | null>(null);
+
+  readonly rooms = this.roomsState.asReadonly();
+  readonly loading = this.loadingState.asReadonly();
+  readonly error = this.errorState.asReadonly();
+
+  setLoading(value: boolean): void {
+    this.loadingState.set(value);
+  }
+
+  setRooms(rooms: RoomQueueVm[]): void {
+    this.roomsState.set(rooms);
+  }
+
+  setError(message: string | null): void {
+    this.errorState.set(message);
+  }
+
+  updateWaitingCount(
+    roomId: number,
+    waitingCount: number
+  ): void {
+    this.roomsState.update(rooms =>
+      rooms.map(room =>
+        room.id === roomId
+          ? { ...room, waitingCount }
+          : room
+      )
+    );
+  }
+
+  reset(): void {
+    this.roomsState.set([]);
+    this.loadingState.set(false);
+    this.errorState.set(null);
+  }
 }
 ```
 
-PermissionService chỉ đọc AuthState để tính quyền:
+State service nên:
+
+```text
+- Không expose writable signal trực tiếp.
+- Cung cấp method transition rõ ràng.
+- Không để component tự mutate state.
+- Có reset nếu lifecycle yêu cầu.
+```
+
+---
+
+### 9.5. State service với RxJS
 
 ```ts
-@Injectable({ providedIn: 'root' })
-export class PermissionService {
-  constructor(private authState: AuthState) {}
+@Injectable()
+export class PatientQueueState {
+  private readonly roomsSubject =
+    new BehaviorSubject<RoomQueueVm[]>([]);
+
+  readonly rooms$ =
+    this.roomsSubject.asObservable();
+
+  setRooms(rooms: RoomQueueVm[]): void {
+    this.roomsSubject.next(rooms);
+  }
+
+  updateWaitingCount(
+    roomId: number,
+    waitingCount: number
+  ): void {
+    const rooms = this.roomsSubject.value;
+
+    this.roomsSubject.next(
+      rooms.map(room =>
+        room.id === roomId
+          ? { ...room, waitingCount }
+          : room
+      )
+    );
+  }
 }
+```
+
+RxJS hay Signal không quyết định scope. Provider scope mới quyết định state lifetime.
+
+---
+
+### 9.6. Facade
+
+```ts
+@Injectable()
+export class PatientQueueFacade {
+  private readonly api = inject(PatientQueueApi);
+  private readonly state = inject(PatientQueueState);
+  private readonly mapper = inject(PatientQueueMapper);
+
+  readonly rooms = this.state.rooms;
+  readonly loading = this.state.loading;
+  readonly error = this.state.error;
+
+  load(): void {
+    this.state.setLoading(true);
+    this.state.setError(null);
+
+    this.api.getRooms().subscribe({
+      next: dtos => {
+        this.state.setRooms(
+          dtos.map(dto => this.mapper.toVm(dto))
+        );
+        this.state.setLoading(false);
+      },
+      error: () => {
+        this.state.setError(
+          'Không thể tải danh sách hàng chờ.'
+        );
+        this.state.setLoading(false);
+      }
+    });
+  }
+}
+```
+
+Facade có nhiệm vụ:
+
+```text
+- Gom use case cho UI.
+- Phối hợp API, state, mapper, realtime.
+- Giảm số dependency component phải biết.
+```
+
+Facade không nên trở thành service khổng lồ mới. Nếu facade chứa quá nhiều use case không liên quan, cần tách theo workflow/page.
+
+---
+
+### 9.7. Route-level composition
+
+```ts
+export const patientQueueRoutes: Routes = [
+  {
+    path: '',
+    providers: [
+      PatientQueueApi,
+      PatientQueueState,
+      PatientQueueMapper,
+      PatientQueueRealtimeHandler,
+      PatientQueueFacade
+    ],
+    loadComponent: () =>
+      import('./patient-queue.page')
+        .then(m => m.PatientQueuePage)
+  }
+];
+```
+
+Đây là composition boundary của feature:
+
+```text
+Feature cần service nào
+→ đăng ký tại route.
+
+Feature bị destroy
+→ state/handler/facade được giải phóng theo route.
+```
+
+---
+
+### 9.8. Component chỉ phụ thuộc facade
+
+```ts
+@Component({
+  selector: 'app-patient-queue-page',
+  standalone: true,
+  template: `
+    @if (facade.loading()) {
+      <p>Đang tải...</p>
+    }
+
+    @for (room of facade.rooms(); track room.id) {
+      <app-room-queue-card [room]="room" />
+    }
+  `
+})
+export class PatientQueuePage
+  implements OnInit {
+  readonly facade = inject(PatientQueueFacade);
+
+  ngOnInit(): void {
+    this.facade.load();
+  }
+}
+```
+
+Component không cần biết:
+
+```text
+- Endpoint nào được gọi.
+- DTO map ra sao.
+- State lưu bằng Signal hay RxJS.
+- Event realtime tên gì.
+- Retry logic nằm ở đâu.
+```
+
+---
+
+### 9.9. Circular dependency
+
+Sai:
+
+```text
+AuthService
+→ inject PermissionService.
+
+PermissionService
+→ inject AuthService.
+```
+
+Đừng xử lý ngay bằng:
+
+```text
+- inject() muộn
+- Injector.get()
+- forwardRef
+- Lazy wrapper
+```
+
+Trước tiên xem đây có phải dấu hiệu responsibilities bị trộn không.
+
+Refactor:
+
+```text
+AuthService ──────┐
+                  ├→ AuthState
+PermissionService ┘
+```
+
+Hoặc:
+
+```text
+AuthService
+→ publish auth event.
+
+PermissionService
+→ derive permission từ current user state.
+```
+
+Circular dependency thường là vấn đề thiết kế, không chỉ là lỗi container.
+
+---
+
+### 9.10. Service Locator anti-pattern
+
+Không nên:
+
+```ts
+@Injectable()
+export class OrderService {
+  constructor(
+    private readonly injector: Injector
+  ) {}
+
+  create(): void {
+    const logger =
+      this.injector.get(LoggerService);
+
+    const api =
+      this.injector.get(OrderApi);
+  }
+}
+```
+
+Dependency bị ẩn khỏi constructor.
+
+Hậu quả:
+
+```text
+- Không nhìn thấy contract thật của class.
+- Test dễ thiếu setup.
+- Class có thể resolve dependency tùy ý.
+- Coupling chuyển từ service cụ thể sang container.
+```
+
+`Injector` phù hợp ở framework/integration boundary đặc biệt, không phải cách inject mặc định.
+
+---
+
+## 10. Case Studies
+
+## 10.1. Case Study 1 — Một WebSocket connection dùng chung
+
+### 10.1.1. Bài toán
+
+Ứng dụng có nhiều feature cần realtime:
+
+```text
+- Hàng chờ khám bệnh
+- Thông báo
+- Đơn hàng
+- Kết quả xét nghiệm
+```
+
+Yêu cầu:
+
+```text
+- Chỉ duy trì một physical WebSocket connection.
+- Mỗi feature chỉ xử lý event của mình.
+- Rời feature phải cleanup listener và leave room.
+- Logout phải đóng connection.
+- Reconnect không tạo connection trùng.
+```
+
+---
+
+### 10.1.2. Sai lầm thường gặp
+
+#### Mỗi component tự mở connection
+
+```ts
+@Component({
+  providers: [WebSocketConnectionService]
+})
+export class PatientQueuePage {}
+```
+
+Hậu quả:
+
+```text
+- Mỗi component tạo socket riêng.
+- Duplicate event.
+- Reconnect chồng chéo.
+- Server giữ nhiều session không cần thiết.
+```
+
+#### Một root service ôm toàn bộ nghiệp vụ
+
+```ts
+@Injectable({
+  providedIn: 'root'
+})
+export class WebSocketService {
+  updateQueue(): void {}
+  updateOrder(): void {}
+  updateNotification(): void {}
+  updateLabResult(): void {}
+}
+```
+
+Hậu quả:
+
+```text
+- Service global phình to.
+- Không cleanup logic theo feature.
+- Feature coupling với nhau.
+- Test khó tách.
+```
+
+---
+
+### 10.1.3. Tách connection và feature handler
+
+```text
+Root scope:
+WebSocketConnectionService
+→ quản lý physical connection.
+
+Feature scope:
+PatientQueueRealtimeHandler
+→ xử lý event hàng chờ.
+
+Feature scope:
+OrderRealtimeHandler
+→ xử lý event đơn hàng.
+```
+
+---
+
+### 10.1.4. Connection service
+
+```ts
+export type ConnectionStatus =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting';
+
+export interface RealtimeMessage<T = unknown> {
+  readonly type: string;
+  readonly payload: T;
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class WebSocketConnectionService {
+  private socket: WebSocket | null = null;
+
+  private readonly messagesSubject =
+    new Subject<RealtimeMessage>();
+
+  private readonly statusSubject =
+    new BehaviorSubject<ConnectionStatus>(
+      'disconnected'
+    );
+
+  readonly messages$ =
+    this.messagesSubject.asObservable();
+
+  readonly status$ =
+    this.statusSubject.asObservable();
+
+  private manuallyClosed = false;
+  private reconnectAttempt = 0;
+  private reconnectSubscription?: Subscription;
+
+  connect(url: string): void {
+    if (
+      this.socket?.readyState === WebSocket.OPEN ||
+      this.socket?.readyState === WebSocket.CONNECTING
+    ) {
+      return;
+    }
+
+    this.manuallyClosed = false;
+    this.statusSubject.next('connecting');
+
+    const socket = new WebSocket(url);
+    this.socket = socket;
+
+    socket.onopen = () => {
+      this.reconnectAttempt = 0;
+      this.statusSubject.next('connected');
+    };
+
+    socket.onmessage = event => {
+      try {
+        const message =
+          JSON.parse(event.data) as RealtimeMessage;
+
+        this.messagesSubject.next(message);
+      } catch (error) {
+        console.error(
+          'Invalid realtime message',
+          error
+        );
+      }
+    };
+
+    socket.onerror = error => {
+      console.error('WebSocket error', error);
+    };
+
+    socket.onclose = () => {
+      if (this.socket === socket) {
+        this.socket = null;
+      }
+
+      this.statusSubject.next('disconnected');
+
+      if (!this.manuallyClosed) {
+        this.scheduleReconnect(url);
+      }
+    };
+  }
+
+  disconnect(): void {
+    this.manuallyClosed = true;
+    this.reconnectSubscription?.unsubscribe();
+    this.reconnectSubscription = undefined;
+
+    this.socket?.close();
+    this.socket = null;
+
+    this.statusSubject.next('disconnected');
+  }
+
+  send<T>(
+    type: string,
+    payload: T
+  ): boolean {
+    if (
+      !this.socket ||
+      this.socket.readyState !== WebSocket.OPEN
+    ) {
+      return false;
+    }
+
+    this.socket.send(
+      JSON.stringify({ type, payload })
+    );
+
+    return true;
+  }
+
+  ofType<T>(
+    type: string
+  ): Observable<RealtimeMessage<T>> {
+    return this.messages$.pipe(
+      filter(
+        (
+          message
+        ): message is RealtimeMessage<T> =>
+          message.type === type
+      )
+    );
+  }
+
+  private scheduleReconnect(
+    url: string
+  ): void {
+    this.statusSubject.next('reconnecting');
+    this.reconnectAttempt += 1;
+
+    const delayMs = Math.min(
+      1000 * 2 ** (this.reconnectAttempt - 1),
+      30000
+    );
+
+    this.reconnectSubscription?.unsubscribe();
+
+    this.reconnectSubscription =
+      timer(delayMs).subscribe(() => {
+        if (!this.manuallyClosed) {
+          this.connect(url);
+        }
+      });
+  }
+}
+```
+
+Điểm thiết kế:
+
+```text
+- Root scope để toàn app dùng chung connection.
+- connect() idempotent ở client level.
+- Reconnect có backoff.
+- disconnect() dành cho logout/app shutdown.
+- Expose message stream, không biết nghiệp vụ.
+```
+
+---
+
+### 10.1.5. Feature realtime handler
+
+```ts
+export interface RoomQueueUpdatedPayload {
+  readonly roomId: number;
+  readonly waitingCount: number;
+}
+
+@Injectable()
+export class PatientQueueRealtimeHandler {
+  private readonly connection =
+    inject(WebSocketConnectionService);
+
+  private readonly state =
+    inject(PatientQueueState);
+
+  private readonly destroyRef =
+    inject(DestroyRef);
+
+  private started = false;
+
+  start(roomIds: number[]): void {
+    if (this.started) {
+      return;
+    }
+
+    this.started = true;
+
+    this.connection.send(
+      'PatientQueue.JoinRooms',
+      { roomIds }
+    );
+
+    this.connection
+      .ofType<RoomQueueUpdatedPayload>(
+        'PatientQueue.RoomUpdated'
+      )
+      .pipe(
+        takeUntilDestroyed(this.destroyRef)
+      )
+      .subscribe(message => {
+        this.state.updateWaitingCount(
+          message.payload.roomId,
+          message.payload.waitingCount
+        );
+      });
+
+    this.destroyRef.onDestroy(() => {
+      this.connection.send(
+        'PatientQueue.LeaveRooms',
+        { roomIds }
+      );
+    });
+  }
+}
+```
+
+Handler ở route scope:
+
+```text
+- Không mở physical connection.
+- Chỉ join room và xử lý event feature.
+- Tự cleanup khi route bị destroy.
+- Có guard tránh start nhiều lần.
+```
+
+---
+
+### 10.1.6. Bootstrap connection
+
+```ts
+@Injectable({
+  providedIn: 'root'
+})
+export class RealtimeBootstrapService {
+  private readonly connection =
+    inject(WebSocketConnectionService);
+
+  private readonly auth =
+    inject(AuthService);
+
+  private readonly config =
+    inject(APP_CONFIG);
+
+  start(): void {
+    const token = this.auth.accessToken();
+
+    if (!token) {
+      return;
+    }
+
+    const url =
+      `${this.config.realtimeUrl}` +
+      `?access_token=${encodeURIComponent(token)}`;
+
+    this.connection.connect(url);
+  }
+
+  stop(): void {
+    this.connection.disconnect();
+  }
+}
+```
+
+Lifecycle:
+
+```text
+Login thành công
+→ start connection.
+
+Mở patient-queue
+→ join room và subscribe feature event.
+
+Rời patient-queue
+→ leave room, cleanup feature listener.
+
+Feature khác
+→ vẫn sử dụng connection root.
+
+Logout
+→ disconnect physical connection.
+```
+
+---
+
+### 10.1.7. Kết luận case
+
+> Connection dùng chung không có nghĩa toàn bộ realtime logic phải global.
+
+```text
+Infrastructure resource
+→ root scope.
+
+Business event handling
+→ feature scope.
+
+Local UI state
+→ component scope khi cần.
+```
+
+---
+
+## 10.2. Case Study 2 — Set state nhưng component khác không nhận
+
+### 10.2.1. Hiện tượng
+
+`RoomListComponent`:
+
+```ts
+this.selectedRoomState.select(roomId);
+```
+
+`RoomDetailComponent`:
+
+```ts
+this.selectedRoomState.selectedRoomId$
+  .subscribe(...);
+```
+
+Nhưng detail không nhận giá trị.
+
+---
+
+### 10.2.2. Nguyên nhân
+
+Root service:
+
+```ts
+@Injectable({
+  providedIn: 'root'
+})
+export class SelectedRoomState {}
+```
+
+Nhưng list component provide lại:
+
+```ts
+@Component({
+  providers: [SelectedRoomState]
+})
+export class RoomListComponent {}
 ```
 
 Kết quả:
 
 ```text
-AuthService và PermissionService không còn phụ thuộc trực tiếp lẫn nhau.
-Cả hai cùng phụ thuộc vào AuthState nhỏ hơn, rõ trách nhiệm hơn.
+RoomListComponent
+→ SelectedRoomState instance B.
+
+RoomDetailComponent
+→ SelectedRoomState instance A từ root.
 ```
+
+Hai bên không giao tiếp vì khác instance.
 
 ---
 
-## 10. DI, Memory Leak và Testability
+### 10.2.3. Cách debug
 
-### 10.1. DI và memory leak
-
-DI không tự gây memory leak, nhưng scope sai có thể giữ object sống lâu hơn mong muốn.
-
-Ví dụ:
+Thêm instance id:
 
 ```ts
 @Injectable({
   providedIn: 'root'
 })
-export class PatientQueueState {
-  private selectedPatient = new BehaviorSubject<Patient | null>(null);
-}
-```
+export class SelectedRoomState {
+  readonly instanceId =
+    crypto.randomUUID();
 
-Nếu state chỉ dùng cho một màn hình nhưng để root, dữ liệu có thể sống suốt vòng đời app.
-
-Hoặc:
-
-```ts
-@Injectable({
-  providedIn: 'root'
-})
-export class RealtimeService {
-  connectRoom(roomId: number) {
-    // subscribe websocket room
+  constructor() {
+    console.log(
+      'SelectedRoomState',
+      this.instanceId
+    );
   }
 }
 ```
 
-Nếu không unsubscribe/leave room đúng cách, root service giữ subscription lâu dài.
-
-Thiết kế tốt hơn:
+Nếu thấy nhiều id ngoài dự kiến, kiểm tra:
 
 ```text
-Root:
-- WebSocketConnectionService quản lý connection chung.
-
-Route/Feature:
-- PatientQueueRealtimeHandler subscribe event màn hàng chờ.
-- Khi feature destroy thì cleanup listener.
+- Component providers
+- Route providers
+- Lazy module providers
+- SharedModule providers
+- TestBed override
 ```
 
 ---
 
-### 10.2. Checklist memory/lifecycle
+### 10.2.4. Cách sửa
+
+Nếu state cần dùng chung toàn app:
 
 ```text
-1. Service có mở websocket/timer/subscription không?
-2. Service đó đang ở root hay feature/component?
-3. Khi rời màn hình có cleanup không?
-4. BehaviorSubject/Signal có giữ object lớn không?
-5. Có cache dữ liệu quá lâu không?
-6. Có provider nào làm service sống lâu hơn dự kiến không?
+Giữ root provider.
+Xóa provider tại component/route.
+```
+
+Nếu chỉ dùng chung trong feature:
+
+```text
+Xóa providedIn: 'root'.
+Provide tại route chung của list và detail.
 ```
 
 ---
 
-### 10.3. DI và testability
+## 10.3. Case Study 3 — Filter không reset khi quay lại màn hình
 
-Không có DI:
+### 10.3.1. Hiện tượng
 
 ```ts
-export class QueueComponent {
-  private api = new RealQueueApi();
+@Injectable({
+  providedIn: 'root'
+})
+export class PatientQueueFilterState {
+  keyword = signal('');
+  roomId = signal<number | null>(null);
 }
 ```
 
-Test khó vì component tự tạo dependency thật.
+Người dùng rời màn hình rồi quay lại, filter cũ vẫn còn.
 
-Có DI:
+---
+
+### 10.3.2. Phân tích
+
+Đây không mặc định là bug.
+
+Câu hỏi nghiệp vụ:
+
+```text
+Quay lại màn hình có cần giữ filter không?
+```
+
+Nếu có:
+
+```text
+Root scope có thể đúng.
+```
+
+Nếu không:
+
+```text
+Filter state nên scoped theo route.
+```
+
+---
+
+### 10.3.3. Sửa bằng route provider
 
 ```ts
-export class QueueComponent {
-  constructor(private api: QueueApi) {}
+@Injectable()
+export class PatientQueueFilterState {
+  readonly keyword = signal('');
+  readonly roomId = signal<number | null>(null);
 }
 ```
 
-Test có thể override provider:
+```ts
+{
+  path: 'patient-queue',
+  providers: [
+    PatientQueueFilterState
+  ]
+}
+```
+
+Rời route:
+
+```text
+Route injector destroy.
+Filter state được giải phóng.
+Quay lại route tạo state mới.
+```
+
+---
+
+## 10.4. Case Study 4 — Multi provider cho validation pipeline
+
+### 10.4.1. Bài toán
+
+Trước khi gọi bệnh nhân, hệ thống cần chạy nhiều validation:
+
+```text
+- Phiếu chưa bị hủy.
+- Phòng còn hoạt động.
+- Bệnh nhân chưa được gọi ở phòng khác.
+- Người dùng có quyền thao tác.
+```
+
+Không muốn một service trung tâm phải biết tất cả validator.
+
+---
+
+### 10.4.2. Contract
+
+```ts
+export interface CallPatientValidator {
+  readonly order: number;
+
+  validate(
+    context: CallPatientContext
+  ): ValidationResult;
+}
+
+export const CALL_PATIENT_VALIDATORS =
+  new InjectionToken<CallPatientValidator[]>(
+    'CALL_PATIENT_VALIDATORS'
+  );
+```
+
+---
+
+### 10.4.3. Provider
+
+```ts
+providers: [
+  {
+    provide: CALL_PATIENT_VALIDATORS,
+    useClass: TicketActiveValidator,
+    multi: true
+  },
+  {
+    provide: CALL_PATIENT_VALIDATORS,
+    useClass: RoomActiveValidator,
+    multi: true
+  },
+  {
+    provide: CALL_PATIENT_VALIDATORS,
+    useClass: PermissionValidator,
+    multi: true
+  }
+]
+```
+
+---
+
+### 10.4.4. Pipeline
+
+```ts
+@Injectable()
+export class CallPatientValidationPipeline {
+  private readonly validators =
+    inject(CALL_PATIENT_VALIDATORS)
+      .slice()
+      .sort((a, b) => a.order - b.order);
+
+  validate(
+    context: CallPatientContext
+  ): ValidationResult {
+    for (const validator of this.validators) {
+      const result =
+        validator.validate(context);
+
+      if (!result.valid) {
+        return result;
+      }
+    }
+
+    return {
+      valid: true
+    };
+  }
+}
+```
+
+Lợi ích:
+
+```text
+- Feature tự đăng ký validator.
+- Không sửa pipeline trung tâm.
+- Dễ test từng validator.
+- Có extension point rõ.
+```
+
+---
+
+## 10.5. Case Study 5 — Circular dependency giữa Auth và Permission
+
+### 10.5.1. Thiết kế ban đầu
+
+```ts
+@Injectable({
+  providedIn: 'root'
+})
+export class AuthService {
+  constructor(
+    private readonly permission:
+      PermissionService
+  ) {}
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class PermissionService {
+  constructor(
+    private readonly auth:
+      AuthService
+  ) {}
+}
+```
+
+---
+
+### 10.5.2. Vấn đề thực sự
+
+Hai service đang cùng sở hữu user context.
+
+```text
+AuthService cần permission để xử lý login.
+PermissionService cần auth để lấy user.
+```
+
+Responsibility chưa được tách rõ.
+
+---
+
+### 10.5.3. Tách state chung
+
+```ts
+@Injectable({
+  providedIn: 'root'
+})
+export class SessionState {
+  private readonly userState =
+    signal<User | null>(null);
+
+  readonly user =
+    this.userState.asReadonly();
+
+  setUser(user: User | null): void {
+    this.userState.set(user);
+  }
+}
+```
+
+```ts
+@Injectable({
+  providedIn: 'root'
+})
+export class AuthService {
+  private readonly session =
+    inject(SessionState);
+}
+```
+
+```ts
+@Injectable({
+  providedIn: 'root'
+})
+export class PermissionService {
+  private readonly session =
+    inject(SessionState);
+
+  can(permission: string): boolean {
+    return this.session
+      .user()
+      ?.permissions.includes(permission)
+      ?? false;
+  }
+}
+```
+
+Dependency graph:
+
+```text
+AuthService ───────┐
+                   ├→ SessionState
+PermissionService ─┘
+```
+
+---
+
+## 11. Testing, troubleshooting và review
+
+### 11.1. Unit test class trực tiếp
+
+Không nhất thiết dùng `TestBed` cho mọi service.
+
+```ts
+const api = new FakePatientQueueApi();
+const state = new PatientQueueState();
+const mapper = new PatientQueueMapper();
+
+const facade = new PatientQueueFacade(
+  api,
+  state,
+  mapper
+);
+```
+
+Phù hợp khi service dùng constructor injection và không phụ thuộc Angular runtime đặc biệt.
+
+---
+
+### 11.2. Override provider trong TestBed
 
 ```ts
 TestBed.configureTestingModule({
   providers: [
+    PatientQueueFacade,
+    PatientQueueState,
     {
-      provide: QueueApi,
+      provide: PatientQueueApi,
       useValue: {
-        getQueue: () => of(mockQueue)
+        getRooms: () => of(mockRooms)
       }
     }
   ]
 });
 ```
 
-DI giúp:
+DI giúp test thay external dependency mà không sửa production code.
 
-```text
-- Mock API.
-- Mock config.
-- Mock permission.
-- Mock current user.
-- Mock websocket.
-- Test facade/state độc lập.
-- Test component không cần gọi API thật.
+---
+
+### 11.3. Test scope
+
+Khi logic phụ thuộc vào component provider:
+
+```ts
+@Component({
+  providers: [RoomFilterState]
+})
+export class RoomFilterComponent {}
 ```
 
-Khi review service nên hỏi:
+Test nên verify hai component instance có state độc lập nếu đó là requirement.
+
+---
+
+### 11.4. `NullInjectorError`
+
+Thông báo:
 
 ```text
-Service này có dễ mock không?
-Component đang phụ thuộc implementation cụ thể hay abstraction?
-Có hard-code config thay vì dùng InjectionToken không?
-Có service nào tự new dependency khiến test khó không?
+NullInjectorError: No provider for X
+```
+
+Checklist:
+
+```text
+1. X có provider không?
+2. Provider có nằm trong injector tree của consumer không?
+3. Token import có đúng object không?
+4. InjectionToken có bị tạo lại không?
+5. Provider có nằm ở lazy route khác không?
+6. Class có metadata phù hợp không?
+7. Có dùng interface làm token trực tiếp không?
 ```
 
 ---
 
-## 11. Checklist và Troubleshooting
-
-### 11.1. Checklist chọn DI scope
-
-Khi tạo service mới, hãy hỏi:
-
-```text
-1. Service này có giữ state không?
-2. State này dùng chung toàn app hay chỉ một feature?
-3. Khi rời màn hình có cần reset không?
-4. Nếu render nhiều component cùng loại, chúng dùng chung hay riêng state?
-5. Service có mở resource như websocket, timer, subscription không?
-6. Service có cache dữ liệu không? Cache sống bao lâu?
-7. Có nguy cơ tạo nhiều instance gây bug không?
-8. Có cần thay implementation theo environment/test/tenant không?
-9. Có nên tách interface/token khỏi implementation không?
-10. Có thể dùng InjectionToken cho config không?
-11. Có dependency vòng tròn không?
-12. Service có đang ôm quá nhiều trách nhiệm không?
-```
-
-Gợi ý quyết định:
-
-```text
-Auth/session/config/permission
-→ root
-
-Feature state/facade/workflow
-→ route/feature
-
-Modal/filter/table selection/wizard state
-→ component
-
-Implementation có thể thay đổi
-→ abstraction + useClass/useFactory
-
-Config/primitive/interface-like value
-→ InjectionToken
-```
-
----
-
-### 11.2. Checklist review Angular DI
-
-Khi review code Angular, nhìn các điểm này:
-
-```text
-1. Service có đang bị provide sai scope không?
-2. Service có giữ state nhưng lại đặt root không?
-3. Service global có mở connection/timer/subscription không?
-4. Có cleanup khi service/component destroy không?
-5. SharedModule có providers không?
-6. Lazy route có vô tình tạo instance mới không?
-7. Auth/permission/config service có bị provide lại ở feature không?
-8. Token có dùng InjectionToken đúng không?
-9. Có tạo nhiều InjectionToken cùng description nhưng khác object không?
-10. useClass/useExisting có bị nhầm không?
-11. Factory provider có quá phức tạp không?
-12. Có circular dependency không?
-13. Có service nào ôm quá nhiều trách nhiệm không?
-14. Component có inject quá nhiều service không?
-15. Có thể gom use case qua facade không?
-16. Test có dễ override provider không?
-17. Có config hard-code thay vì InjectionToken không?
-18. Multi provider có cần thứ tự xử lý rõ ràng không?
-```
-
----
-
-### 11.3. Lỗi `NullInjectorError: No provider for X`
-
-Cách nghĩ:
-
-```text
-Angular không tìm thấy provider cho token X trong injector tree hiện tại.
-```
-
-Kiểm tra:
-
-```text
-- X có providedIn chưa?
-- X có nằm trong providers chưa?
-- Component hiện tại có nhìn thấy provider không?
-- Có import nhầm token không?
-- InjectionToken có bị tạo lại ở file khác không?
-```
-
----
-
-### 11.4. Service có nhiều instance ngoài ý muốn
+### 11.5. Service bị tạo nhiều instance
 
 Dấu hiệu:
 
 ```text
-- Constructor service log nhiều lần.
-- Set state nơi này, nơi khác không nhận.
-- Subject emit nhưng subscriber không thấy.
+- Constructor log nhiều lần.
+- State set ở nơi này nhưng nơi khác không thấy.
 - WebSocket mở nhiều connection.
-- Cache miss khó hiểu.
+- Cache bị miss ngoài dự kiến.
+- Event xử lý nhiều lần.
 ```
 
 Kiểm tra:
 
 ```text
-- Service có bị provide ở component không?
-- Có bị provide trong lazy module không?
-- SharedModule có providers không?
-- TestBed có override provider không?
+- providers ở component
+- providers ở route
+- lazy module
+- SharedModule
+- provider override
+- nhiều bootstrap application
 ```
 
 ---
 
-### 11.5. State không reset khi rời màn hình
+### 11.6. Memory leak
 
-Nguyên nhân thường gặp:
+DI không tự gây leak, nhưng scope sai có thể giữ object lâu hơn cần thiết.
 
-```text
-Feature state đặt ở root.
-```
-
-Cách nghĩ:
+Kiểm tra service có:
 
 ```text
-Nếu state thuộc màn hình/feature, hãy cân nhắc route-level provider.
+- Subscription không cleanup
+- Timer
+- WebSocket
+- DOM listener
+- Cache object lớn
+- BehaviorSubject giữ dữ liệu cũ
+- Closure giữ component/reference
 ```
+
+Nguyên tắc:
+
+```text
+Resource thuộc lifecycle nào
+→ service sở hữu resource nên có scope tương ứng.
+
+Root resource
+→ cleanup ở logout/app destroy.
+
+Feature resource
+→ cleanup khi route destroy.
+
+Component resource
+→ cleanup khi component destroy.
+```
+
+Sử dụng:
+
+```ts
+takeUntilDestroyed(inject(DestroyRef))
+```
+
+cho subscription gắn với lifecycle của service/component.
 
 ---
 
-### 11.6. Component inject quá nhiều service
-
-Ví dụ:
+### 11.7. Component inject quá nhiều service
 
 ```ts
 constructor(
-  private api: PatientQueueApi,
-  private state: PatientQueueState,
-  private mapper: PatientQueueMapper,
-  private realtime: PatientQueueRealtimeHandler,
-  private permission: PermissionService,
-  private toast: ToastService,
-  private router: Router
+  private readonly api: PatientQueueApi,
+  private readonly state: PatientQueueState,
+  private readonly realtime: PatientQueueRealtimeHandler,
+  private readonly permission: PermissionService,
+  private readonly toast: ToastService,
+  private readonly router: Router
 ) {}
 ```
 
-Dấu hiệu component đang ôm quá nhiều use case.
+Đây là dấu hiệu component đang phối hợp quá nhiều use case.
 
-Cân nhắc tạo facade:
+Refactor:
 
 ```ts
-constructor(private facade: PatientQueueFacade) {}
+constructor(
+  readonly facade: PatientQueueFacade
+) {}
+```
+
+Không phải constructor dài nào cũng cần facade, nhưng UI component không nên trở thành orchestration service.
+
+---
+
+### 11.8. Factory provider quá phức tạp
+
+Dấu hiệu:
+
+```text
+- Factory dài hàng chục dòng.
+- Có nhiều if/else nghiệp vụ.
+- Mở resource.
+- Gọi API.
+- Tạo subscription.
+```
+
+Factory nên tạo dependency, không nên trở thành workflow.
+
+Refactor logic vào:
+
+```text
+- Configuration service
+- Strategy resolver
+- Bootstrap service
+- Dedicated factory class
 ```
 
 ---
 
-## 12. Tóm tắt và lộ trình học tiếp
+### 11.9. Checklist khi tạo service
 
-### 12.1. Tóm tắt nhanh
+```text
+1. Service chịu trách nhiệm gì?
+2. Service có giữ state không?
+3. State thuộc app, feature hay component?
+4. Consumer nào phải dùng chung instance?
+5. Khi nào instance nên bị destroy?
+6. Service có sở hữu resource không?
+7. Resource cleanup ở đâu?
+8. Có cần nhiều implementation không?
+9. Có cần runtime token không?
+10. Có cần InjectionToken cho config không?
+11. Có nguy cơ provider bị shadow không?
+12. Có dependency vòng tròn không?
+13. Test có thể thay dependency dễ không?
+14. Component có đang biết quá nhiều service không?
+```
+
+---
+
+### 11.10. Checklist review provider scope
+
+```text
+Root provider:
+- Có thật sự là app-wide không?
+- Có mutable state theo user/tenant không?
+- Có reset đúng khi logout/đổi tenant không?
+- Có thread/event/subscription dài hạn không?
+
+Route provider:
+- Các page con có cùng nằm dưới route provider không?
+- Rời route có thật sự destroy route injector không?
+- Route reuse strategy có giữ lại route không?
+
+Component provider:
+- Có cố ý tạo instance riêng không?
+- Child component có cần dùng chung instance này không?
+- Component được render nhiều lần có gây resource lặp không?
+```
+
+---
+
+### 11.11. Checklist review InjectionToken
+
+```text
+- Token được export từ một nơi duy nhất?
+- Description có rõ để debug?
+- Generic type có chính xác?
+- Config có readonly không?
+- Default factory có side effect không?
+- Provider override có chủ đích không?
+- Multi provider có thống nhất multi: true không?
+- Thứ tự multi provider có được xác định không?
+```
+
+---
+
+### 11.12. Checklist review kiến trúc service
+
+```text
+- API service có chỉ tập trung HTTP không?
+- State service có expose readonly state không?
+- State transition có method rõ ràng không?
+- Facade có orchestration vừa phải không?
+- Realtime handler có tách khỏi connection không?
+- Mapper có pure không?
+- UI có phụ thuộc implementation hạ tầng không?
+- Có service locator không?
+- Có circular dependency không?
+- Scope có khớp lifecycle dữ liệu không?
+```
+
+---
+
+## 12. Tổng kết
+
+### 12.1. Các khái niệm cốt lõi
 
 ```text
 Dependency
-→ Thứ class cần để hoạt động.
-
-@Injectable()
-→ Đánh dấu class có thể tham gia Angular DI.
-
-Provider
-→ Cấu hình nói với Angular cách cung cấp dependency.
-
-Injector
-→ Nơi lưu provider và resolve dependency.
+→ thứ class cần để hoạt động.
 
 Token
-→ Key để Angular tìm provider.
+→ key runtime dùng để lookup dependency.
 
-providedIn: 'root'
-→ Đăng ký provider ở root injector, thường dùng chung toàn app.
+Provider
+→ cấu hình cách cung cấp dependency cho token.
 
-providers ở component
-→ Tạo instance riêng cho component và subtree.
+Injector
+→ nơi lưu provider, tạo và cache instance.
 
-providers ở route/feature
-→ Tạo instance scoped theo route/feature.
+@Injectable()
+→ metadata để Angular có thể tạo class qua DI.
 
 InjectionToken
-→ Dùng khi dependency không có runtime type như interface, config, primitive, array, function.
+→ runtime token cho dependency không có class runtime.
+```
 
+---
+
+### 12.2. Scope
+
+```text
+Root
+→ dùng chung theo application.
+
+Route
+→ dùng chung theo feature/route.
+
+Component
+→ instance riêng theo component subtree.
+```
+
+Scope quyết định:
+
+```text
+- Số lượng instance
+- Lifetime
+- State lifetime
+- Resource ownership
+- Cleanup boundary
+```
+
+---
+
+### 12.3. Provider types
+
+```text
 useClass
-→ Token A dùng implementation class B.
+→ chọn implementation class.
 
 useValue
-→ Token A trả về value cố định.
+→ cung cấp value có sẵn.
 
 useFactory
-→ Token A được tạo bằng function có logic.
+→ tạo dependency bằng logic.
 
 useExisting
-→ Token A là alias tới token B, dùng chung instance.
+→ alias tới instance của token khác.
 
-multi provider
-→ Nhiều provider cùng đóng góp vào một token, injector trả về array.
-
-Tư duy thiết kế
-→ DI không chỉ để inject service.
-→ DI dùng để kiểm soát scope, lifecycle, state lifetime, testability và architecture.
+multi: true
+→ nhiều provider đóng góp vào một token.
 ```
 
 ---
 
-### 12.2. Cách nói ngắn gọn khi cần giải thích
+### 12.4. Tư duy quan trọng nhất
 
-Một câu trả lời tốt:
-
-> Dependency Injection trong Angular là cơ chế để class không tự tạo dependency, mà khai báo dependency cần dùng; Angular injector sẽ resolve dependency dựa trên provider. Điểm quan trọng của Angular DI là injector có phân cấp, nên cùng một service có thể là instance dùng chung toàn app, scoped theo route/feature, hoặc scoped theo từng component instance. Vì vậy khi thiết kế service, không chỉ hỏi “inject được không”, mà phải hỏi service này nên sống bao lâu, state có dùng chung không, có cần reset khi rời màn hình không, và có cần thay implementation để test hoặc chạy theo environment không.
-
-Câu này thể hiện các ý chính:
+Khi tạo service, không chỉ hỏi:
 
 ```text
-- DI.
-- Provider.
-- Injector hierarchy.
-- Scope.
-- Lifecycle.
-- Testability.
-- Architecture.
+Inject như thế nào?
 ```
 
----
-
-### 12.3. Lộ trình học tiếp
-
-Sau DI, nên học tiếp theo thứ tự:
+Cần hỏi:
 
 ```text
-1. Angular component lifecycle.
-2. RxJS state trong service.
-3. Signals state trong Angular.
-4. Facade pattern trong Angular.
-5. HTTP Interceptor nâng cao.
-6. Route-level providers.
-7. Standalone APIs.
-8. Angular testing với TestBed.
-9. Circular dependency và refactor service.
-10. Component architecture và smart/dumb component.
-```
-
----
-
-### 12.4. Kết luận
-
-Nền tảng cần hiểu:
-
-```text
-DI giúp class không tự tạo dependency.
-@Injectable() đánh dấu class có thể tham gia DI.
-Provider đăng ký cách cung cấp dependency.
-Injector là nơi Angular tìm và tạo instance.
-```
-
-Khi làm dự án thực tế cần hiểu:
-
-```text
-Service có thể sống ở root, route hoặc component.
-Scope sai có thể tạo nhiều instance hoặc làm state sống quá lâu.
-Bug state nhiều khi bắt nguồn từ provider scope.
-```
-
-Khi thiết kế/review cần hiểu:
-
-```text
-DI là quyết định kiến trúc.
-Service nên sống bao lâu?
-Có bao nhiêu instance?
-State thuộc app, feature hay component?
-Có cần reset khi rời route không?
-Có dễ mock/test không?
-Có bị circular dependency không?
-Có đang che giấu service quá nhiều trách nhiệm không?
+- Service này thuộc boundary nào?
+- Ai phải dùng chung instance?
+- Nó nên sống bao lâu?
+- State khi nào phải reset?
+- Nó có sở hữu resource không?
+- Có cần thay implementation không?
+- Provider đặt ở đâu để phản ánh đúng lifecycle?
 ```
 
 Chốt lại:
 
-> Angular Dependency Injection không chỉ là kỹ thuật inject service vào component. Nó là công cụ kiến trúc để kiểm soát dependency, lifecycle, scope, state lifetime, testability và khả năng mở rộng của ứng dụng Angular.
+> Angular DI là công cụ quản lý dependency graph và object lifetime.
+> Khi token, provider, injector và scope được thiết kế đúng, component mỏng hơn, state rõ lifecycle hơn, resource được tái sử dụng đúng chỗ, và hệ thống dễ test cũng như mở rộng hơn.

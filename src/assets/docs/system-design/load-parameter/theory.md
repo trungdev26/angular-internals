@@ -2061,7 +2061,7 @@ Degradation plan:
 
 ---
 
-## 10. Case Study: Hàng chờ khám bệnh
+## 10. Hàng chờ khám bệnh
 
 ### 10.1 Business context
 
@@ -2268,7 +2268,7 @@ Nếu nhiều tenant/phòng hot:
 
 ---
 
-## 11. Case Study: Refresh status từ 3rd-party
+## 11. Refresh status từ 3rd-party
 
 ### 11.1 Business context
 

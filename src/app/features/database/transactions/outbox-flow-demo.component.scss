@@ -1,0 +1,373 @@
+:host {
+  display: block;
+}
+
+.outbox-simulator {
+  overflow: hidden;
+  border: 1px solid #dce4ef;
+  border-radius: 11px;
+  background: var(--demo-surface);
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  padding: 11px 15px;
+  border-bottom: 1px solid #e7edf5;
+
+  span,
+  strong {
+    display: block;
+  }
+
+  span {
+    color: var(--demo-text-muted);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+  }
+
+  strong {
+    margin-top: 2px;
+    color: var(--demo-text-strong);
+    font-size: 12px;
+  }
+
+  b {
+    padding: 5px 9px;
+    color: #475569;
+    border-radius: 999px;
+    background: var(--demo-surface-muted);
+    font-size: 10px;
+  }
+}
+
+.flow-canvas {
+  overflow-x: auto;
+  background: var(--demo-surface-subtle);
+
+  svg {
+    display: block;
+    width: 100%;
+    min-width: 900px;
+    height: 290px;
+    shape-rendering: geometricPrecision;
+    text-rendering: geometricPrecision;
+  }
+}
+
+.flow-line {
+  fill: none;
+  stroke: #94a3b8;
+  stroke-width: 2;
+  marker-end: url(#flow-arrow);
+}
+
+marker path {
+  fill: #94a3b8;
+}
+
+.failure-line {
+  stroke: #f59e0b;
+  stroke-dasharray: 7 7;
+}
+
+.failure-window,
+.boundary-label {
+  fill: #b45309;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-anchor: middle;
+}
+
+.transaction-boundary {
+  fill: #eff6ff;
+  fill-opacity: 0.55;
+  stroke: #60a5fa;
+  stroke-dasharray: 6 5;
+}
+
+.boundary-label {
+  fill: #2563eb;
+}
+
+.flow-node {
+  opacity: 0.55;
+
+  rect {
+    fill: var(--demo-surface);
+    stroke: var(--demo-border-strong);
+    stroke-width: 1.5;
+  }
+
+  text {
+    text-anchor: middle;
+  }
+
+  .node-type {
+    fill: var(--demo-text-muted);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+  }
+
+  .node-title {
+    fill: var(--demo-text-strong);
+    font-size: 14px;
+    font-weight: 800;
+  }
+
+  .node-state {
+    fill: #475569;
+    font-size: 9px;
+    font-weight: 700;
+  }
+
+  .node-note {
+    fill: #15803d;
+    font-size: 8px;
+    font-weight: 800;
+  }
+}
+
+.flow-node.active {
+  opacity: 1;
+
+  rect {
+    stroke: #2563eb;
+  }
+}
+
+.flow-node.outbox.active rect,
+.flow-node.consumer.active rect {
+  fill: #f0fdf4;
+  stroke: #22c55e;
+}
+
+.flow-node.broker.active rect {
+  fill: #fff7ed;
+  stroke: #f97316;
+}
+
+.danger {
+  fill: #dc2626 !important;
+}
+
+.event-token {
+  filter: drop-shadow(0 5px 8px rgb(37 99 235 / 20%));
+  will-change: transform;
+
+  rect {
+    fill: #2563eb;
+  }
+
+  circle {
+    fill: #bfdbfe;
+  }
+
+  text {
+    fill: var(--demo-surface);
+    font-size: 10px;
+    font-weight: 800;
+    text-anchor: middle;
+  }
+}
+
+.event-token.hidden {
+  opacity: 0;
+}
+
+.event-token.lost {
+  animation: lost-event 0.75s ease-in-out infinite alternate;
+
+  rect {
+    fill: #dc2626;
+  }
+}
+
+.event-token.duplicate rect {
+  fill: #f97316;
+}
+
+.crash-point {
+  circle {
+    fill: #fff1f2;
+    stroke: #ef4444;
+    stroke-width: 2;
+  }
+
+  text {
+    fill: #b91c1c;
+    font-size: 9px;
+    font-weight: 900;
+    text-anchor: middle;
+  }
+
+  .crash-subtitle {
+    font-size: 8px;
+    font-weight: 700;
+  }
+}
+
+.process-crash,
+.durable-badge {
+  text {
+    font-size: 9px;
+    font-weight: 800;
+    text-anchor: middle;
+  }
+}
+
+.process-crash {
+  rect {
+    fill: #fff1f2;
+    stroke: #ef4444;
+  }
+
+  text {
+    fill: #b91c1c;
+  }
+}
+
+.durable-badge {
+  rect {
+    fill: #dcfce7;
+    stroke: #22c55e;
+  }
+
+  text {
+    fill: #15803d;
+  }
+}
+
+@keyframes lost-event {
+  to {
+    opacity: 0.08;
+    filter: drop-shadow(0 0 9px rgb(220 38 38 / 45%));
+  }
+}
+
+@media (max-width: 720px) {
+  header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .flow-canvas svg {
+    width: 900px;
+    height: 235px;
+  }
+}
+
+:host-context(html[data-theme='dark']) {
+  .outbox-simulator {
+    border-color: #29364a;
+    background: #101827;
+  }
+
+  header {
+    border-color: #29364a;
+
+    span {
+      color: #9aa8bc;
+    }
+
+    strong {
+      color: #e6edf8;
+    }
+
+    b {
+      color: var(--demo-border-strong);
+      background: #1e293b;
+    }
+  }
+
+  .flow-canvas {
+    background: #0b1220;
+  }
+
+  .flow-line {
+    stroke: #475569;
+  }
+
+  marker path {
+    fill: var(--demo-text-muted);
+  }
+
+  .failure-window,
+  .boundary-label {
+    fill: #fbbf24;
+  }
+
+  .transaction-boundary {
+    fill: #172554;
+    stroke: #60a5fa;
+  }
+
+  .flow-node {
+    rect {
+      fill: #101827;
+      stroke: #475569;
+    }
+
+    .node-type,
+    .node-state {
+      fill: #9aa8bc;
+    }
+
+    .node-title {
+      fill: #e6edf8;
+    }
+  }
+
+  .flow-node.active rect {
+    fill: #172554;
+    stroke: #60a5fa;
+  }
+
+  .flow-node.outbox.active rect,
+  .flow-node.consumer.active rect {
+    fill: #12351f;
+    stroke: #4ade80;
+  }
+
+  .flow-node.broker.active rect {
+    fill: #3b2415;
+    stroke: #fb923c;
+  }
+
+  .flow-node .node-note {
+    fill: #4ade80;
+  }
+
+  .event-token text {
+    fill: var(--demo-surface);
+  }
+
+  .crash-point,
+  .process-crash {
+    circle,
+    rect {
+      fill: #3f1620;
+      stroke: #f87171;
+    }
+
+    text {
+      fill: #fca5a5;
+    }
+  }
+
+  .durable-badge {
+    rect {
+      fill: #12351f;
+      stroke: #4ade80;
+    }
+
+    text {
+      fill: #86efac;
+    }
+  }
+}

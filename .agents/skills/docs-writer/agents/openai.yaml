@@ -1,0 +1,4 @@
+interface:
+  display_name: "Modern Documentation Writer"
+  short_description: "Write modern, progressive technical lessons"
+  default_prompt: "Use $docs-writer to write this topic as a modern progressive documentation lesson."

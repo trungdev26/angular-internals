@@ -1,4 +1,4 @@
-# Case Study 02. Multi-step Form Production
+# Multi-step Form Production
 
 Case này mô phỏng một task frontend production rất hay gặp: làm màn hình tạo/sửa hồ sơ nhiều bước, có validation theo từng step, draft state, lưu nháp, submit chống double click và cảnh báo khi rời trang.
 

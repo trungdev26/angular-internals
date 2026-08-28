@@ -1,4 +1,4 @@
-# Case Study 03. Unsaved Changes Detection
+# Unsaved Changes Detection
 
 Case này xử lý một bài toán form production rất hay gặp: user sửa dữ liệu rồi rời trang thì cần cảnh báo, nhưng nếu user sửa rồi nhập lại đúng như ban đầu thì không nên cảnh báo.
 

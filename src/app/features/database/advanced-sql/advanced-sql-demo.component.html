@@ -1,0 +1,169 @@
+<section class="advanced-sql-demo">
+  <header class="hero">
+    <span>{{ lab.eyebrow }}</span>
+    <h2>{{ lab.title }}</h2>
+    <p>{{ lab.description }}</p>
+  </header>
+
+  <section class="case-brief">
+    <div>
+      <span>BÀI TOÁN</span>
+      <h3>{{ lab.problem }}</h3>
+    </div>
+    <div>
+      <span>CẦN GIẢI THÍCH</span>
+      <p>{{ lab.question }}</p>
+    </div>
+  </section>
+
+  <section class="workspace">
+    <div class="query-panel">
+      <header>
+        <div>
+          <span>POSTGRESQL</span>
+          <strong>Query đang mô phỏng</strong>
+        </div>
+        <b>{{
+          lab.id === 'cte' ? 'Recursive' : lab.id === 'window' ? 'Analytical' : 'Correlated'
+        }}</b>
+      </header>
+      <pre><code>{{ lab.query }}</code></pre>
+    </div>
+
+    <div class="input-panel">
+      <header>
+        <span>INPUT DATA</span>
+        <strong>Dữ liệu tối thiểu của bài toán</strong>
+      </header>
+      <div class="input-tables">
+        <article *ngFor="let table of lab.inputTables; trackBy: trackByIndex">
+          <h4>{{ table.name }}</h4>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th *ngFor="let column of table.columns">{{ column.label }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr *ngFor="let row of table.rows">
+                  <td *ngFor="let column of table.columns">{{ row[column.key] }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="simulation">
+    <div class="section-heading">
+      <div>
+        <span>01</span>
+        <strong>Chạy query theo execution order</strong>
+      </div>
+      <b>Bước {{ currentStepIndex + 1 }} / {{ lab.steps.length }}</b>
+    </div>
+
+    <div class="progress"><div [style.width.%]="progressPercent"></div></div>
+
+    <div class="step-bar">
+      <div>
+        <span>{{ currentStep ? 'BƯỚC ĐANG CHẠY' : 'TRƯỚC KHI CHẠY' }}</span>
+        <h3>{{ currentStep?.title || 'Dự đoán intermediate result' }}</h3>
+        <p>
+          {{
+            currentStep?.detail ||
+              'Chạy từng bước để quan sát source row, relational operator và tập kết quả trung gian.'
+          }}
+        </p>
+      </div>
+      <div class="playback">
+        <div>
+          <button
+            type="button"
+            (click)="previousStep()"
+            [disabled]="currentStepIndex < 0 || isPlaying"
+          >
+            Quay lại
+          </button>
+          <button type="button" class="primary" (click)="nextStep()" [disabled]="isPlaying">
+            {{ currentStepIndex >= lab.steps.length - 1 ? 'Chạy lại' : 'Bước tiếp theo' }}
+          </button>
+          <button type="button" (click)="togglePlay()">
+            {{ isPlaying ? 'Tạm dừng' : 'Tự chạy' }}
+          </button>
+        </div>
+        <div class="speed">
+          <span>Tốc độ</span>
+          <button type="button" [class.active]="speedMs === 1500" (click)="setSpeed(1500)">
+            0.5×
+          </button>
+          <button type="button" [class.active]="speedMs === 1000" (click)="setSpeed(1000)">
+            1×
+          </button>
+          <button type="button" [class.active]="speedMs === 550" (click)="setSpeed(550)">2×</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pipeline">
+      <div class="pipeline-track">
+        <div class="track-line"></div>
+        <div class="operation-token" [style.left.%]="tokenPosition">
+          {{ currentStep?.operation || 'READY' }}
+        </div>
+      </div>
+      <div class="pipeline-nodes">
+        <article [class.active]="currentStep?.phase === 'source'">
+          <span>SOURCE RELATION</span>
+          <strong>{{ lab.inputTables[0].name }}</strong>
+          <small>Đọc row đầu vào</small>
+        </article>
+        <article [class.active]="currentStep?.phase === 'operator'">
+          <span>RELATIONAL OPERATOR</span>
+          <strong>{{ lab.operatorLabel }}</strong>
+          <small>{{ currentStep?.stateLabel || 'Chưa xử lý' }}</small>
+        </article>
+        <article [class.active]="currentStep?.phase === 'result'">
+          <span>RESULT RELATION</span>
+          <strong>{{ resultRows.length }} rows</strong>
+          <small>Intermediate hoặc final result</small>
+        </article>
+      </div>
+    </div>
+
+    <div class="result-panel">
+      <header>
+        <div>
+          <span>INTERMEDIATE RESULT</span>
+          <strong>{{ currentStep?.stateLabel || 'Chưa có row được tạo' }}</strong>
+        </div>
+        <b>{{ resultRows.length }} rows</b>
+      </header>
+      <div class="table-scroll" *ngIf="resultRows.length; else emptyResult">
+        <table>
+          <thead>
+            <tr>
+              <th *ngFor="let column of lab.resultColumns">{{ column.label }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let row of resultRows">
+              <td *ngFor="let column of lab.resultColumns">{{ row[column.key] }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ng-template #emptyResult>
+        <div class="empty-result">Chạy bước tiếp theo để tạo intermediate result.</div>
+      </ng-template>
+    </div>
+
+    <app-step-history
+      [entries]="executedStepLog"
+      [totalSteps]="lab.steps.length"
+    ></app-step-history>
+  </section>
+</section>

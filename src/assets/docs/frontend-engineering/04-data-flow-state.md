@@ -1,4 +1,4 @@
-# 04. Data flow và state trong feature
+# Data flow và state trong feature
 
 Frontend khó maintain thường không phải vì thiếu component, mà vì data flow mờ: không biết state nằm đâu, ai update, API load theo gì, form và URL ai là source of truth.
 
