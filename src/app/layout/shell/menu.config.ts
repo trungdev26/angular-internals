@@ -526,6 +526,15 @@ export const MENU_SECTIONS: MenuSection[] = addCascadingIndexes(
             },
           ],
         },
+        {
+          title: 'Ứng dụng',
+          items: [
+            {
+              label: 'Food Delivery Backend Foundation Design',
+              link: '/backend-engineering/case-studies/food-delivery-backend-foundation-design',
+            },
+          ],
+        },
       ],
     },
     {

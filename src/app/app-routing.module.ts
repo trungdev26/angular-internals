@@ -545,6 +545,14 @@ const routes: Routes = [
         component: MarkdownDocComponent,
         data: { docSrc: 'assets/docs/backend-engineering/05-ddd-tactical-design.md' },
       },
+      {
+        path: 'case-studies/food-delivery-backend-foundation-design',
+        component: MarkdownDocComponent,
+        data: {
+          docSrc:
+            'assets/docs/backend-engineering/case-studies/food-delivery-backend-foundation-design.md',
+        },
+      },
     ],
   },
   {
