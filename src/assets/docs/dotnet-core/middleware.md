@@ -811,7 +811,335 @@ public async Task Maintenance_mode_returns_503_for_api()
 }
 ```
 
-## 15. Checklist thiết kế và review
+## 15. Tư duy thiết kế middleware từ yêu cầu thực tế
+
+Biết cú pháp `UseMiddleware<T>()` chưa đủ để thiết kế pipeline. Điểm khó là xác định một yêu cầu có thật sự thuộc HTTP pipeline hay không, middleware cần đứng ở đâu và state nào phải tồn tại trước khi nó chạy.
+
+Phần này dùng một luồng xuyên suốt: khách hàng gọi `POST /api/don-hang` trên hệ thống đặt đồ ăn multi-tenant. Host có thể là `live.food.com.vn` hoặc subdomain riêng như `banhmycay.food.com.vn`. Token xác định người dùng; host và quyền truy cập xác định tenant; body chứa `shopId` và các món cần đặt.
+
+### 15.1. Pipeline là Chain of Responsibility có chiều quay về
+
+Mỗi middleware giữ một `RequestDelegate` trỏ tới bước kế tiếp. Nó có ba lựa chọn:
+
+1. Xử lý rồi gọi `next`.
+2. Không gọi `next` và tự tạo response, gọi là **short-circuit**.
+3. Bao quanh `next` bằng code chạy trước và sau.
+
+Đây là hình thức thực tế của **Chain of Responsibility**: request lần lượt đi qua các handler cho đến khi một handler dừng chuỗi hoặc endpoint xử lý nó. Vì `await next(context)` trả quyền điều khiển về middleware trước đó, pipeline đồng thời có hành vi giống các **Decorator** lồng nhau.
+
+```text
+Request
+  -> ExceptionHandling before
+    -> CorrelationId before
+      -> TenantResolution before
+        -> Authentication
+          -> Authorization
+            -> Endpoint
+          <- Authorization
+        <- TenantResolution after
+      <- CorrelationId after
+  <- ExceptionHandling catch/after
+Response
+```
+
+Tên pattern giúp mô tả cấu trúc, nhưng không quyết định thiết kế. Quyết định phải bắt đầu từ dữ liệu đầu vào, phạm vi tác động và failure mode.
+
+### 15.2. Decision tree chọn đúng extension point
+
+Đặt lần lượt các câu hỏi sau:
+
+```text
+Concern có áp dụng cho hầu hết HTTP request hoặc một nhánh route?
+  Có -> Middleware
+  Không
+    Concern cần endpoint metadata, model binding hoặc action result?
+      Có -> MVC filter / endpoint filter
+      Không
+        Concern là quyền trên một resource cụ thể?
+          Có -> Authorization policy/handler hoặc application service
+          Không
+            Concern bảo vệ invariant nghiệp vụ?
+              Có -> Aggregate / domain service
+              Không -> Application service hoặc decorator quanh use case
+```
+
+Áp dụng vào hệ thống đặt hàng:
+
+| Yêu cầu | Vị trí | Lý do |
+| --- | --- | --- |
+| Gắn `correlationId` cho mọi request | Middleware | Chính sách HTTP toàn cục, không cần model nghiệp vụ. |
+| Phân giải tenant từ host | Middleware | Nhiều bước phía sau cần cùng một `tenantId`. |
+| Endpoint chỉ dành cho shop owner | Authorization policy | Cần identity và metadata quyền của endpoint. |
+| Kiểm tra `shopId` thuộc tenant hiện tại | Application service và query predicate | Đây là resource authorization gắn với dữ liệu, chỉ đọc host là chưa đủ. |
+| Không cho đặt món đã ngừng bán | Aggregate/application service | Đây là invariant nghiệp vụ và phải đúng cả khi gọi từ HTTP lẫn background job. |
+| Đo thời gian mọi handler của một use case | Application decorator | Concern bao quanh application handler, không phụ thuộc HTTP. |
+
+Middleware không phải lựa chọn mặc định cho mọi cross-cutting concern. Nếu cùng một rule phải chạy từ consumer hoặc scheduled job, đặt nó trong middleware sẽ tạo một đường đi bỏ qua rule.
+
+### 15.3. Suy ra thứ tự từ dependency
+
+Không học thuộc một danh sách cố định. Với mỗi middleware, ghi rõ **đầu vào nó cần** và **state nó tạo ra**. Sau đó sắp xếp theo dependency.
+
+| Middleware | State cần trước khi chạy | State tạo ra |
+| --- | --- | --- |
+| `ExceptionHandling` | Không có | Error response thống nhất cho lỗi phía sau. |
+| `CorrelationId` | Header request | `TraceIdentifier`, response header, log scope. |
+| `ForwardedHeaders` | Cấu hình trusted proxy | Scheme, host và client IP đã chuẩn hóa. |
+| `TenantResolution` | Host thật sau proxy | `TenantContext`. |
+| `Routing` | Path | Endpoint và metadata. |
+| `Authentication` | Credential, có thể cần tenant | `HttpContext.User`. |
+| `Authorization` | User và endpoint metadata | Quyết định cho phép hoặc 401/403. |
+
+Từ bảng này có thể suy ra:
+
+- `ForwardedHeaders` phải đứng trước code đọc host nếu ứng dụng chạy sau reverse proxy.
+- `TenantResolution` phải đứng trước service/query cần `tenantId`.
+- `Authentication` phải đứng trước `Authorization` vì authorization đọc `HttpContext.User`.
+- Middleware đọc `GetEndpoint()` phải đứng sau routing.
+- `ExceptionHandling` phải đứng ngoài các middleware có thể throw nếu muốn chuẩn hóa lỗi của chúng.
+
+```csharp
+app.UseExceptionHandler();
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseForwardedHeaders();
+app.UseMiddleware<TenantResolutionMiddleware>();
+
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+```
+
+Thứ tự giữa `CorrelationId` và exception handler là một trade-off. Đặt correlation trước exception handler giúp handler đọc ID nhưng correlation middleware không được handler bao lỗi. Đặt exception handler trước correlation bao được lỗi của correlation middleware, nhưng handler phải dùng `TraceIdentifier` mặc định nếu lỗi xảy ra trước khi ID được gắn. Với middleware correlation nhỏ và có validation đơn giản, cả hai hợp lệ; cần chọn rõ failure nào quan trọng hơn.
+
+### 15.4. Bước 1: định nghĩa invariant ở HTTP boundary
+
+Trước khi viết code, ghi các điều kiện phải luôn đúng:
+
+```text
+1. Mỗi request có một correlationId hợp lệ để truy vết.
+2. Request vào API tenant phải phân giải được đúng một tenant đang hoạt động.
+3. Client không được tự quyết định tenantId bằng body hoặc query string.
+4. Mọi query dữ liệu tenant phải có tenant predicate ở data/application boundary.
+5. Lỗi trước khi response started phải có error contract thống nhất.
+```
+
+Điều 3 giải thích vì sao không nhận `tenantId` từ payload làm nguồn tin cậy. Điều 4 giải thích giới hạn của middleware: `TenantContext` chỉ cung cấp context; nó không tự động làm Dapper query an toàn.
+
+### 15.5. Bước 2: tạo request-scoped Tenant Context
+
+`TenantContext` là state của request hiện tại nên dùng scoped lifetime. Chưa cần interface nếu chỉ có một implementation và không có boundary cần thay thế.
+
+```csharp
+public sealed class TenantContext
+{
+    public Guid? TenantId { get; private set; }
+
+    public Guid RequireTenantId() => TenantId
+        ?? throw new InvalidOperationException("Tenant has not been resolved.");
+
+    public void Set(Guid tenantId)
+    {
+        if (TenantId is not null)
+            throw new InvalidOperationException("Tenant was already resolved.");
+
+        TenantId = tenantId;
+    }
+}
+
+builder.Services.AddScoped<TenantContext>();
+```
+
+`Set` chỉ cho ghi một lần để middleware phía sau không thể âm thầm đổi tenant giữa request. `RequireTenantId` fail fast thay vì trả `Guid.Empty`, vì `Guid.Empty` có thể biến lỗi cấu hình thành query sai dữ liệu.
+
+### 15.6. Bước 3: phân giải tenant bằng middleware
+
+Repository dưới đây đại diện cho hạ tầng đọc mapping `host -> tenant`. Code cache hoặc database cụ thể được bỏ qua vì không thay đổi invariant.
+
+```csharp
+public sealed class TenantResolutionMiddleware
+{
+    private readonly RequestDelegate _next;
+
+    public TenantResolutionMiddleware(RequestDelegate next) => _next = next;
+
+    public async Task InvokeAsync(
+        HttpContext context,
+        TenantContext tenantContext,
+        ITenantHostLookup tenantLookup)
+    {
+        var host = context.Request.Host.Host.Trim().ToLowerInvariant();
+        var tenantId = await tenantLookup.FindActiveTenantIdAsync(
+            host,
+            context.RequestAborted);
+
+        if (tenantId is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            await context.Response.WriteAsJsonAsync(
+                new ProblemDetails
+                {
+                    Status = StatusCodes.Status404NotFound,
+                    Title = "Tenant was not found"
+                },
+                context.RequestAborted);
+            return;
+        }
+
+        tenantContext.Set(tenantId.Value);
+        await _next(context);
+    }
+}
+```
+
+`TenantContext` và `ITenantHostLookup` được inject vào `InvokeAsync`, không giữ trong constructor của conventional middleware. Lý do là middleware instance có vòng đời dài, còn hai dependency thuộc request scope.
+
+Với host chung như `live.food.com.vn`, host không đủ để chọn một tenant cụ thể. Luồng đăng nhập chung cần một quy tắc riêng: tenant có thể đến từ claim đã được server ký hoặc người dùng chọn sau đăng nhập. Khi đó không nên nhét hai chiến lược mơ hồ vào một middleware lớn; endpoint chung có thể được đánh dấu metadata để bỏ qua host resolution, sau đó authentication/application flow chọn tenant theo contract rõ ràng.
+
+### 15.7. Bước 4: sử dụng context nhưng vẫn bảo vệ query
+
+EF Core có thể áp dụng global query filter. Dapper không biết `TenantContext` nếu câu SQL không dùng nó.
+
+```csharp
+public async Task<ShopDto?> GetShopAsync(Guid shopId, CancellationToken ct)
+{
+    var tenantId = _tenantContext.RequireTenantId();
+
+    const string sql = """
+        SELECT id, tenShop
+        FROM Shop
+        WHERE id = @shopId
+          AND tenantId = @tenantId
+          AND deletedAt IS NULL
+        """;
+
+    return await _connection.QuerySingleOrDefaultAsync<ShopDto>(
+        new CommandDefinition(sql, new { shopId, tenantId }, cancellationToken: ct));
+}
+```
+
+Failure case:
+
+```text
+Request A thuộc tenant X gọi GET /shops/42
+Shop 42 thực tế thuộc tenant Y
+SQL chỉ có WHERE id = @shopId
+Middleware đã phân giải đúng X nhưng query vẫn trả dữ liệu của Y
+```
+
+Vì vậy tenant middleware giải quyết **context propagation**, không giải quyết toàn bộ **data isolation**. Database predicate, unique constraint đúng scope và authorization theo resource vẫn phải được thiết kế riêng.
+
+### 15.8. Bước 5: giữ business rule ngoài middleware
+
+Ví dụ sai:
+
+```csharp
+if (context.Request.Path.StartsWithSegments("/api/don-hang") && shop.DangDongCua)
+{
+    context.Response.StatusCode = StatusCodes.Status409Conflict;
+    return;
+}
+```
+
+Rule “shop đóng cửa thì không nhận đơn” phụ thuộc shop, khung giờ, loại đơn và có thể được gọi từ HTTP, scheduled order hoặc consumer. Đặt rule trong middleware làm nó phụ thuộc path và bị bỏ qua ở các entry point khác.
+
+```csharp
+public sealed class DonHangService
+{
+    public async Task<Guid> TaoAsync(TaoDonHangCommand command, CancellationToken ct)
+    {
+        var tenantId = _tenantContext.RequireTenantId();
+        var shop = await _shopRepository.GetRequiredAsync(tenantId, command.ShopId, ct);
+
+        shop.DamBaoDangNhanDon(_clock.UtcNow);
+
+        var donHang = DonHang.Tao(tenantId, shop.Id, command.MonAn);
+        await _donHangRepository.AddAsync(donHang, ct);
+        return donHang.Id;
+    }
+}
+```
+
+Middleware xác định request thuộc tenant nào. Application service điều phối use case. Aggregate bảo vệ invariant nhận đơn. Mỗi layer giữ một loại quyết định, nên worker sau này có thể gọi cùng application/domain logic mà không cần giả lập `HttpContext`.
+
+### 15.9. Pattern catalogue theo dấu hiệu
+
+| Dấu hiệu trong yêu cầu | Pattern/cơ chế nên xem xét | Câu hỏi xác nhận |
+| --- | --- | --- |
+| “Mọi request đều phải...” | Middleware / Chain of Responsibility | Có entry point ngoài HTTP cần cùng rule không? |
+| “Làm trước và sau bước kế tiếp” | Decorator-like middleware | Response có thể đã started không? |
+| “Nếu điều kiện sai thì trả ngay” | Short-circuit | Status, body, header và log có thống nhất không? |
+| “Chỉ route `/internal`” | `Map` | Có cần quay lại pipeline chính không? |
+| “Chỉ endpoint có metadata X” | Middleware sau routing hoặc filter | Metadata đã tồn tại tại vị trí này chưa? |
+| “Dependency scoped cho mỗi request” | Inject vào `InvokeAsync` hoặc `IMiddleware` | Có vô tình giữ scoped service trong singleton không? |
+| “Bao quanh mọi command handler” | Application decorator | Concern có thật sự phụ thuộc HTTP không? |
+| “Đơn hàng phải luôn...” | Aggregate/domain service | Rule có cần đúng ở worker và message consumer không? |
+
+Pattern là kết quả của constraint, không phải mục tiêu. Không tạo base middleware, generic pipeline builder hoặc custom framework khi hai class độc lập đã rõ hơn.
+
+### 15.10. Failure walkthrough: hai request đặt món đồng thời
+
+Hai khách cùng đặt phần hàng hóa cuối cùng:
+
+```text
+Request A -> TenantResolution -> DonHangService -> đọc soLuong = 1
+Request B -> TenantResolution -> DonHangService -> đọc soLuong = 1
+A tạo đơn và trừ kho
+B tạo đơn và trừ kho
+Kết quả: oversell
+```
+
+Thêm middleware lock theo URL không phải lời giải tốt:
+
+- Lock chỉ có hiệu lực trong một process nếu dùng memory.
+- Nhiều instance ứng dụng vẫn chạy đồng thời.
+- URL không phải aggregate boundary.
+- Lock toàn route làm giảm throughput của các shop không liên quan.
+
+Correctness phải được bảo vệ tại nơi ghi dữ liệu, ví dụ atomic update:
+
+```sql
+UPDATE TonKho
+SET soLuong = soLuong - @soLuongDat
+WHERE tenantId = @tenantId
+  AND shopId = @shopId
+  AND hangHoaId = @hangHoaId
+  AND soLuong >= @soLuongDat;
+```
+
+Nếu affected rows bằng `0`, use case trả conflict hoặc hết hàng. Middleware vẫn có nhiệm vụ tạo context và error contract; database constraint/transaction giải quyết concurrency. Đây là ví dụ quan trọng để không chọn pattern theo từ khóa “nhiều request cùng lúc”.
+
+### 15.11. Quy trình tự viết middleware
+
+Khi gặp một yêu cầu mới, thực hiện theo thứ tự:
+
+1. Viết một câu mô tả concern và phạm vi: mọi HTTP request, một nhánh hay một use case.
+2. Liệt kê input đáng tin, output/state tạo ra và failure response.
+3. Kiểm tra entry point ngoài HTTP; nếu rule vẫn phải đúng ở đó, không đặt ownership trong middleware.
+4. Viết invariant trước code.
+5. Xác định middleware cần state nào từ bước trước và middleware sau cần state nào từ nó.
+6. Chọn continue, short-circuit hay wrap `next`.
+7. Chọn conventional middleware hay `IMiddleware` theo DI lifetime, không theo sở thích.
+8. Viết happy path ngắn nhất trước, rồi thêm đúng các guard ở trust boundary.
+9. Kiểm tra `Response.HasStarted`, cancellation, request body size và dữ liệu nhạy cảm nếu concern chạm tới chúng.
+10. Viết một integration test xác nhận thứ tự hoặc short-circuit; unit test riêng chỉ khi logic nhánh đủ phức tạp.
+
+Một bản thiết kế ngắn có thể dùng mẫu sau:
+
+```text
+Concern: phân giải tenant cho API tenant-scoped.
+Scope: HTTP request, trừ endpoint public/shared-host có metadata cho phép bỏ qua.
+Trusted input: normalized host sau trusted proxy; signed claim khi dùng shared host.
+Produces: request-scoped TenantContext.
+Invariant: tenant được set tối đa một lần; query tenant-scoped luôn dùng tenantId.
+Ordering: after ForwardedHeaders, before consumers of TenantContext.
+Failure: unknown/inactive tenant -> 404; malformed trusted input -> 400/401 tùy nguồn.
+Not owned here: shop ownership, menu visibility, stock concurrency.
+Verification: integration test known host, unknown host, bypass endpoint và cross-tenant query.
+```
+
+## 16. Checklist thiết kế và review
 
 1. Concern này có áp dụng ở HTTP boundary hay là business rule cần nằm trong application/domain layer?
 2. Middleware có cần `next()` không? Nếu không, status/header/body khi short-circuit có nhất quán không?
