@@ -269,18 +269,6 @@ export const MENU_SECTIONS: MenuSection[] = addCascadingIndexes(
         {
           title: '2. Nâng cao',
           items: [
-            {
-              label: 'EF Core Production Patterns',
-              link: '/dotnet-core/ef-core-production-patterns',
-            },
-            {
-              label: 'EF Core + Dapper Shared Transaction',
-              link: '/dotnet-core/ef-dapper-shared-transaction',
-            },
-            {
-              label: 'Background Services & Workers',
-              link: '/dotnet-core/background-services-workers',
-            },
             { label: 'Task, Thread và Process', link: '/dotnet-core/task-thread-process' },
             { label: 'Garbage Collector (GC)', link: '/dotnet-core/garbage-collector' },
           ],
@@ -291,10 +279,6 @@ export const MENU_SECTIONS: MenuSection[] = addCascadingIndexes(
             {
               label: '01. Sinh mã nhiều instance',
               link: '/dotnet-core/case-studies/multi-instance-code-generation',
-            },
-            {
-              label: '02. Tính tồn kho và replay giao dịch',
-              link: '/dotnet-core/case-studies/inventory-balance-recalculation',
             },
           ],
         },
