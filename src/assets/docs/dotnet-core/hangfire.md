@@ -1,17 +1,19 @@
 # Hangfire trong ASP.NET Core
 
-Hangfire là framework dùng để lập lịch và thực thi các tác vụ nền trong ứng dụng .NET. Thay vì giữ một thread hoặc object tồn tại trong memory, Hangfire lưu mô tả của công việc vào persistent storage để worker có thể thực thi sau.
+Hangfire là framework dùng để lập lịch và thực thi các tác vụ nền trong ứng dụng .NET. Hangfire không giữ thread hoặc object của request để chờ thực thi. Thay vào đó, framework lưu mô tả của công việc vào persistent storage.
 
-Mỗi tác vụ được lưu dưới dạng một background job. Về bản chất, background job là một lời gọi method bền vững, gồm:
+Một background job về bản chất là một lời gọi method được lưu lại để thực thi sau. Payload của job gồm:
 
 - Tên đầy đủ của class hoặc interface chứa method cần gọi.
 - Tên method và danh sách kiểu tham số.
 - Giá trị các đối số sau khi được serialize.
 - Queue tiếp nhận job, thời điểm tạo và metadata phục vụ quá trình thực thi.
 
-Tập thông tin trên được gọi là **method invocation**. Khi nhận job, worker tạo một execution scope mới, khôi phục invocation, resolve các dependency qua DI và gọi method tương ứng. Worker không tiếp tục HTTP request đã tạo ra job.
+Tập thông tin này được gọi là **method invocation**. Vì invocation được lưu trong persistent storage, nó còn được xem như một **durable method invocation**.
 
-Invocation được lưu bền vững nên job không phụ thuộc vào process đã tạo ra nó. Nếu API dừng sau khi lưu job, worker trong process khác vẫn có thể tiếp tục xử lý.
+Worker không tiếp tục request ban đầu. Khi nhận job, worker tạo một execution scope mới, deserialize invocation, resolve các dependency qua DI và gọi method tương ứng.
+
+Job không phụ thuộc vào process đã tạo ra nó. Nếu API dừng sau khi lưu job, worker trong process khác vẫn có thể tiếp tục xử lý.
 
 Các ví dụ trong chương sử dụng nền tảng sau:
 
@@ -195,10 +197,6 @@ Hangfire Server là tập background process chạy trong một .NET process.
 | Counter aggregator | Tổng hợp counter phục vụ monitoring. |
 
 `WorkerCount` là số execution slot của một server, không phải tổng số background process.
-
-### Dashboard
-
-Dashboard là projection vận hành đọc qua Monitoring API của storage. Dashboard không tham gia execution path và không bắt buộc để job chạy.
 
 ## Job lifecycle tổng quan
 
@@ -962,6 +960,12 @@ sequenceDiagram
 
 Hangfire không cung cấp exactly-once side effect. Correctness boundary nằm tại business database hoặc external provider.
 
+### Unknown outcome
+
+Unknown outcome xuất hiện khi worker không nhận được kết quả chắc chắn từ một side effect. Ví dụ, email provider đã nhận request nhưng connection bị ngắt trước khi trả response. Worker chỉ quan sát được timeout; nó không biết email chưa được gửi hay đã được gửi thành công.
+
+Retry ngay trong trạng thái này có thể tạo duplicate. Job phải kiểm tra trạng thái tại provider, đọc idempotency record hoặc chạy reconciliation trước khi quyết định thực hiện lại side effect.
+
 ### Idempotency và retry
 
 Idempotency key cho email xác nhận:
@@ -1182,6 +1186,66 @@ Không có email xác nhận
 
 `Succeeded` chỉ phản ánh kết quả thực thi method theo góc nhìn của Hangfire. Nếu code bắt exception rồi tiếp tục, technical state sẽ lệch khỏi business result.
 
+### Server view
+
+Server view trả lời ba câu hỏi:
+
+1. Process nào còn heartbeat?
+2. Mỗi process có bao nhiêu workers?
+3. Process lắng nghe queues nào?
+
+Server heartbeat cũ không tự động chứng minh machine chết; network partition hoặc MySQL connectivity failure tạo cùng biểu hiện. Application log và infrastructure health hoàn thiện chẩn đoán.
+
+### Queue view
+
+Queue length là snapshot backlog. Oldest-job age biểu diễn user impact tốt hơn khi arrival rate thay đổi.
+
+```text
+Queue length = 10.000, throughput = 5.000/minute
+  -> backlog có thể được giải phóng trong khoảng 2 phút
+
+Queue length = 100, oldest age = 2 giờ
+  -> queue có thể thiếu worker hoặc chứa poison/blocked workload
+```
+
+Dashboard không mặc định cung cấp đầy đủ SLO calculation. Metrics pipeline cần record enqueue time, start time và final state để tính percentile.
+
+### Processing view
+
+Processing duration được đối chiếu với job-specific expectation. Một export 20 phút có thể bình thường; một notification 20 phút là stalled dependency hoặc timeout policy thiếu.
+
+Processing job trên server không còn heartbeat có khả năng chờ provider recovery. Manual requeue trước recovery có thể tạo concurrent duplicate execution.
+
+### Failed và retry view
+
+Investigation record tối thiểu:
+
+```text
+Hangfire jobId
+tenantId / shopId
+business key
+job type
+current state
+state history
+attempt number
+exception type
+external request/idempotency key
+worker serverId
+```
+
+Exception message không đủ để phân loại unknown outcome. Timeout sau external call cần provider lookup hoặc reconciliation.
+
+### Operator actions
+
+| Action | Technical effect | Business consequence |
+| --- | --- | --- |
+| Retry/Requeue | Tạo execution attempt mới | Side effect có thể lặp. |
+| Delete | Chuyển hoặc loại job khỏi processing flow | Không rollback business data. |
+| Trigger recurring | Tạo execution ngoài schedule thông thường | Có thể chạy song song execution đang tồn tại. |
+| Change queue/config | Thay worker routing | Không migrate job nếu provider/API không thực hiện transition tương ứng. |
+
+Operator identity, reason, timestamp, job ID và business key thuộc audit record. Dashboard button không thay approval policy cho payment, refund hoặc document issuance.
+
 ### Security
 
 Dashboard hiển thị method, serialized arguments, exception và stack trace; đồng thời cung cấp retry, delete và trigger operations. Endpoint cần authentication, role authorization và network restriction.
@@ -1211,9 +1275,9 @@ app.UseHangfireDashboard("/hangfire", new DashboardOptions
 
 Job arguments không chứa password, access token hoặc dữ liệu cá nhân không cần thiết. Retry, delete và manual trigger thuộc audit trail vận hành.
 
-### Production operation
+## Production operation
 
-#### Deployment compatibility
+### Deployment compatibility
 
 Schema installation thuộc deployment pipeline; runtime account chỉ có DML permission. Rolling deployment giữ compatibility với queued payload:
 
@@ -1226,7 +1290,7 @@ deploy worker đọc được V1 và V2
 
 Đổi namespace, assembly, type, method signature hoặc argument DTO trước khi job cũ drain có thể làm worker không deserialize được payload.
 
-#### Observability
+### Observability
 
 Dashboard phục vụ điều tra từng job; monitoring system chịu trách nhiệm alert và historical metrics.
 
@@ -1240,15 +1304,15 @@ Dashboard phục vụ điều tra từng job; monitoring system chịu trách nh
 
 Structured log của mỗi execution gồm `jobId`, `tenantId`, business key, job type, attempt và trace context.
 
-#### Operational failure cases
+### Operational failure cases
 
-##### Queue không có worker
+#### Queue không có worker
 
 Job giữ state `Enqueued` khi không có worker fetch nó. Theo thời gian, queue length và oldest-job age cùng tăng.
 
 Server view trong Dashboard không hiển thị instance nào đăng ký queue tương ứng. Hai nguyên nhân phổ biến là queue name khác nhau giữa producer và worker, hoặc worker deployment thiếu queue configuration.
 
-##### Retry storm
+#### Retry storm
 
 ```mermaid
 flowchart LR
@@ -1260,13 +1324,13 @@ flowchart LR
 
 Worker limit, queue isolation, backoff và circuit/rate policy giới hạn amplification. Permanent error không đi vào cùng retry policy với transient error.
 
-##### Manual retry sau timeout
+#### Manual retry sau timeout
 
 Timeout không chứng minh provider chưa xử lý request. Manual retry payment hoặc notification dựa trên provider status và idempotency record, không chỉ technical state của Hangfire.
 
-### Schema lifecycle và retention
+## Schema lifecycle và retention
 
-#### Schema installation
+### Schema installation
 
 Storage provider cần physical tables và indexes trước khi Client hoặc Server hoạt động. Hai execution modes có mục tiêu khác nhau:
 
@@ -1280,7 +1344,7 @@ Auto schema creation làm startup của mỗi production replica phụ thuộc v
 
 Deployment migration tách schema change khỏi runtime startup. Migration được review và chạy bằng deployment identity trước khi application replicas nhận traffic; runtime identity chỉ giữ các DML permissions cần thiết.
 
-#### Table prefix consistency
+### Table prefix consistency
 
 `TablesPrefix` là physical namespace. Producer và worker dùng prefix khác nhau hoạt động như hai Hangfire systems độc lập dù cùng connection string:
 
@@ -1295,7 +1359,7 @@ Kết quả: enqueue thành công, không job nào được xử lý
 
 Prefix là immutable deployment contract trừ khi có data migration đầy đủ.
 
-#### Retention model
+### Retention model
 
 Succeeded jobs và monitoring data không tồn tại vô hạn. Expiration manager xóa record theo expiration metadata và provider interval.
 
@@ -1313,7 +1377,7 @@ retention ngắn
 
 Business audit không phụ thuộc retention của Hangfire. Thông tin pháp lý, thanh toán, lịch sử trạng thái đơn hàng và operator action nằm trong business audit store.
 
-#### Index và storage growth
+### Index và storage growth
 
 Growth rate phụ thuộc enqueue throughput, state transitions trên mỗi job, retries, argument size và retention:
 
@@ -1322,68 +1386,6 @@ rowsPerDay ≈ jobsPerDay × (job row + state rows + queue/parameter/counter row
 ```
 
 Retry-heavy workload tăng `State` nhanh hơn số business operations. Dashboard query chậm có thể xuất phát từ storage size, index statistics, counter aggregation hoặc list limit; tăng web timeout không xử lý nguyên nhân.
-
-### Điều tra qua Dashboard
-
-#### Server view
-
-Server view trả lời ba câu hỏi:
-
-1. Process nào còn heartbeat?
-2. Mỗi process có bao nhiêu workers?
-3. Process lắng nghe queues nào?
-
-Server heartbeat cũ không tự động chứng minh machine chết; network partition hoặc MySQL connectivity failure tạo cùng biểu hiện. Application log và infrastructure health hoàn thiện chẩn đoán.
-
-#### Queue view
-
-Queue length là snapshot backlog. Oldest-job age biểu diễn user impact tốt hơn khi arrival rate thay đổi.
-
-```text
-Queue length = 10.000, throughput = 5.000/minute
-  -> backlog có thể được giải phóng trong khoảng 2 phút
-
-Queue length = 100, oldest age = 2 giờ
-  -> queue có thể thiếu worker hoặc chứa poison/blocked workload
-```
-
-Dashboard không mặc định cung cấp đầy đủ SLO calculation. Metrics pipeline cần record enqueue time, start time và final state để tính percentile.
-
-#### Processing view
-
-Processing duration được đối chiếu với job-specific expectation. Một export 20 phút có thể bình thường; một notification 20 phút là stalled dependency hoặc timeout policy thiếu.
-
-Processing job trên server không còn heartbeat có khả năng chờ provider recovery. Manual requeue trước recovery có thể tạo concurrent duplicate execution.
-
-#### Failed và retry view
-
-Investigation record tối thiểu:
-
-```text
-Hangfire jobId
-tenantId / shopId
-business key
-job type
-current state
-state history
-attempt number
-exception type
-external request/idempotency key
-worker serverId
-```
-
-Exception message không đủ để phân loại unknown outcome. Timeout sau external call cần provider lookup hoặc reconciliation.
-
-#### Operator actions
-
-| Action | Technical effect | Business consequence |
-| --- | --- | --- |
-| Retry/Requeue | Tạo execution attempt mới | Side effect có thể lặp. |
-| Delete | Chuyển hoặc loại job khỏi processing flow | Không rollback business data. |
-| Trigger recurring | Tạo execution ngoài schedule thông thường | Có thể chạy song song execution đang tồn tại. |
-| Change queue/config | Thay worker routing | Không migrate job nếu provider/API không thực hiện transition tương ứng. |
-
-Operator identity, reason, timestamp, job ID và business key thuộc audit record. Dashboard button không thay approval policy cho payment, refund hoặc document issuance.
 
 ## Capacity planning và suy ra cấu hình
 
@@ -1500,114 +1502,6 @@ Trước khi triển khai job chạy hàng chục phút, cần đánh giá:
 - Retry boundary khi execution bị ngắt ở gần cuối.
 
 Không phải job dài nào cũng cần tách. Nếu operation có các stages độc lập và mỗi stage có outcome bền vững, workflow theo stages với durable checkpoint thường phục hồi tốt hơn một execution khổng lồ. Nếu operation không có ranh giới tự nhiên, giữ một job và giới hạn concurrency sẽ đơn giản hơn.
-
-## Khi Hangfire không còn là boundary phù hợp
-
-Hangfire phù hợp khi application cần lưu và thực thi các method của .NET dưới dạng job. Giới hạn xuất hiện khi requirement chuyển từ background method execution sang distributed messaging hoặc workflow orchestration.
-
-### Consumer độc lập
-
-Một job gửi email có một worker và một outcome rõ ràng. Một business event như `DonHangDaHoanThanh` có thể cần nhiều consumers:
-
-```text
-DonHangDaHoanThanh
-  -> Billing
-  -> Notification
-  -> Analytics
-  -> External Integration
-```
-
-Nếu các consumers cần deploy, scale, retry và retention độc lập, một integration event qua message broker tạo boundary rõ hơn invocation của một Hangfire method.
-
-### Hợp đồng không phụ thuộc .NET type
-
-Hangfire invocation chứa type và method identity của .NET. Cách biểu diễn này phù hợp giữa producer và worker cùng codebase hoặc cùng release contract.
-
-Khi consumers sử dụng ngôn ngữ khác hoặc thuộc services có release cycle độc lập, message schema ổn định phù hợp hơn .NET method signature. Integration contract khi đó cần versioning, ownership và compatibility policy riêng.
-
-### Fan-out, replay và stream processing
-
-Hangfire queue hướng tới việc một worker xử lý một job. Các requirement sau thuộc messaging hoặc streaming platform:
-
-- Một event được nhiều consumer groups xử lý độc lập.
-- Event được lưu dài hạn để replay.
-- Consumer tự quản lý offset.
-- Xử lý stream theo partition và ordering key.
-- Tái tạo projection từ event history.
-
-Việc bổ sung các capability này bằng bảng và filters riêng làm Hangfire storage trở thành một message platform tự xây dựng.
-
-### Workflow dài hạn
-
-Continuation biểu diễn dependency ngắn giữa jobs. Workflow có manual approval, timer nhiều ngày, compensation và nhiều nhánh cần business state machine hoặc workflow engine.
-
-```text
-PendingPayment
-  -> Paid
-  -> Preparing
-  -> Delivering
-  -> Completed
-
-PaymentFailed
-  -> ReleaseInventory
-  -> Cancelled
-```
-
-Các trạng thái trên là business state và phải tồn tại độc lập với retention của Hangfire technical states.
-
-## Abstraction theo capability
-
-Application layer không phụ thuộc trực tiếp vào tên technology như `IMySqlHangfireService` hoặc `IRabbitMqService`. Interface mô tả capability và guarantee mà use case cần.
-
-### Background job capability
-
-Nếu application cần lập lịch một tác vụ nội bộ:
-
-```csharp
-public interface IBackgroundJobScheduler
-{
-    string Enqueue<TJob>(Expression<Func<TJob, Task>> operation);
-}
-```
-
-Infrastructure adapter có thể dùng Hangfire. Interface này chỉ phù hợp khi application thực sự cần che Hangfire API hoặc sở hữu một contract riêng.
-
-Nếu chỉ một vài composition-root hoặc infrastructure handlers enqueue job, sử dụng trực tiếp `IBackgroundJobClient` đơn giản hơn. Trường hợp đó chưa cần thêm abstraction.
-
-### Integration event capability
-
-Requirement “phát một integration event bền vững cho consumers độc lập” có semantic khác background method execution:
-
-```csharp
-public interface IIntegrationEventPublisher
-{
-    Task PublishAsync(
-        IntegrationEvent message,
-        CancellationToken cancellationToken);
-}
-```
-
-Hai interfaces không được gộp thành `IMessageService`. Background job mang method-invocation semantics; integration event mang durable-message semantics. Interface chung sẽ che mất guarantee mà caller cần hiểu.
-
-### Quy tắc thay đổi
-
-Adapter có thể che thay đổi implementation khi semantic giữ nguyên:
-
-```text
-Hangfire MySQL provider A
-  -> Hangfire MySQL provider B
-
-semantic vẫn là persistent background job
-```
-
-Adapter không nên che thay đổi semantic:
-
-```text
-background method invocation
-  -> durable integration event cho nhiều consumers
-```
-
-Trường hợp thứ hai cần capability và contract mới. Việc giữ nguyên interface chỉ để giảm số file sửa sẽ làm application hiểu sai delivery guarantee.
 
 ## Khung quyết định thiết kế
 
