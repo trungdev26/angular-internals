@@ -196,6 +196,95 @@ Succeeded
 
 `Failed` trong history không đồng nghĩa current state là `Failed`; retry filter có thể đã chuyển job sang `Scheduled`.
 
+### State election và apply state
+
+State transition trong Hangfire không chỉ là phép gán một chuỗi. Component xử lý đề xuất một candidate state; filter có thể thay candidate trước khi storage commit transition.
+
+```mermaid
+sequenceDiagram
+    participant Worker
+    participant Performer as Job Performer
+    participant Filter as State Filters
+    participant Storage
+
+    Worker->>Performer: invoke job method
+    Performer-->>Worker: exception
+    Worker->>Filter: elect FailedState
+    Filter-->>Worker: ScheduledState nếu còn retry
+    Worker->>Storage: apply ScheduledState
+    Storage-->>Worker: transition committed
+```
+
+`AutomaticRetryAttribute` tham gia state election. Exception tạo `FailedState` candidate, nhưng current state sau transaction có thể là `Scheduled`. Cơ chế này giải thích ba hiện tượng vận hành:
+
+- Dashboard có failed entry trong history trong khi current state là scheduled.
+- Retry delay không giữ worker thread ở trạng thái sleep; worker slot được giải phóng sau khi scheduled state được ghi.
+- Process restart không làm mất retry schedule vì due time nằm trong storage.
+
+State filter là infrastructure extension point. Business invariant như “đơn đã hủy không được gửi xác nhận” vẫn thuộc job/application/domain logic vì invariant phải đúng ngoài Hangfire pipeline.
+
+### Worker fetch loop
+
+Worker thực hiện một vòng lặp logic:
+
+```text
+poll configured queues
+  -> fetch queue item
+  -> create Processing state
+  -> deserialize invocation
+  -> create DI scope
+  -> activate job type
+  -> invoke method
+  -> elect and persist final state
+  -> dispose scope
+```
+
+Fetch và `Processing` phục vụ hai mục tiêu khác nhau. Fetch cấp quyền tạm thời trên queue item; `Processing` ghi nhận execution attempt trong state model. Một process có thể chết giữa hai bước hoặc sau side effect nhưng trước final state, do đó recovery không thể suy ra chính xác side effect đã xảy ra hay chưa.
+
+### Server heartbeat và abandoned execution
+
+Mỗi Hangfire Server định kỳ ghi heartbeat vào storage. Heartbeat age cho biết process còn giao tiếp với storage, không cho biết từng business method vẫn progress.
+
+```text
+Server heartbeat mới + job Processing lâu
+  -> job thực sự dài
+  -> dependency bị treo
+  -> code không quan sát cancellation
+
+Server heartbeat cũ + nhiều job Processing
+  -> process chết hoặc mất kết nối storage
+  -> chờ recovery theo provider
+```
+
+Recovery tạo khả năng redelivery vì storage không có đủ bằng chứng để kết luận execution đã `Succeeded` hoặc `Failed`. Đây là nguồn gốc của at-least-once semantics.
+
+### MySQL transaction và distributed coordination
+
+Storage provider dùng MySQL transaction để giữ consistency giữa queue, job và state. Distributed coordination dùng shared database thay vì memory lock trong từng process.
+
+Một in-memory `lock` chỉ serialize threads trong một replica:
+
+```text
+API A: lock object A
+API B: lock object B
+```
+
+Hai object không có quan hệ với nhau. Multi-instance coordination phải dựa trên resource chung như row/transaction/lock primitive của MySQL provider.
+
+Lock của Hangfire chỉ bảo vệ Hangfire resource. Business row có transaction và lock lifecycle riêng:
+
+```text
+Hangfire storage transaction
+  -> fetch JobQueue
+  -> write State
+
+Business transaction
+  -> update DonHang
+  -> reserve TonKho
+```
+
+Hai transaction không atomic chỉ vì chúng cùng chạy trên MySQL hoặc cùng một physical server.
+
 ## Cấu hình .NET 6 và MySQL
 
 ### Package và database
@@ -357,6 +446,290 @@ RecurringJob.AddOrUpdate<IDongBoMenuJob>(
 ```
 
 `CancellationToken.None` là placeholder trong expression. Hangfire thay argument này bằng execution token. Recurring ID chứa tenant và shop scope để các definitions không ghi đè lẫn nhau.
+
+### Fire-and-forget lifecycle
+
+Fire-and-forget mô tả một lần thực thi sớm nhất có thể, không mô tả exactly-once. Producer nhận `jobId` ngay sau storage commit; worker có thể bắt đầu trước hoặc sau HTTP response tùy scheduling.
+
+```text
+t0  producer persist Job + Enqueued state
+t1  Enqueue trả jobId
+t2  worker fetch
+t3  method bắt đầu
+t4  method kết thúc
+t5  Succeeded được persist
+```
+
+Client chỉ quan sát được mốc `t1`. Business API cần endpoint trạng thái riêng nếu client phải theo dõi kết quả nghiệp vụ; `jobId` không thay business identifier.
+
+### Delayed job internals
+
+Delayed job chưa nằm trong executable queue. Storage giữ job trong scheduled structure với score/due time. Schedule poller chuyển job đến hạn sang `Enqueued`.
+
+```mermaid
+flowchart LR
+    Client --> Scheduled[(Scheduled set<br/>dueAt)]
+    Scheduled -->|poller: dueAt <= now| Queue[(JobQueue)]
+    Queue --> Worker
+```
+
+Độ trễ thực tế gồm scheduling interval, queue wait và worker availability:
+
+```text
+actualStartAt - requestedDueAt
+  = schedulePollingDelay
+  + queueDelay
+  + workerContention
+```
+
+Delayed job không phù hợp với hard realtime deadline. Business deadline cần persistence, late-execution policy và reconciliation riêng.
+
+### Recurring job internals
+
+Recurring job là definition, không phải execution record. Definition chứa recurring ID, cron, timezone, queue và invocation metadata. Mỗi due time tạo một fire-and-forget job độc lập có `jobId` riêng.
+
+```text
+Recurring definition: sync-menu:T1:S1
+  -> execution job 1001 at 10:00
+  -> execution job 1048 at 10:10
+  -> execution job 1102 at 10:20
+```
+
+`AddOrUpdate` là upsert theo recurring ID. ID scope sai tạo configuration collision:
+
+```text
+sync-menu              -> tenant sau ghi đè tenant trước
+sync-menu:{tenantId}   -> tách tenant, chưa tách shop
+sync-menu:{tenantId}:{shopId} -> đúng scope tenant và shop
+```
+
+Timezone là một phần của schedule contract. UTC tránh ambiguity do daylight-saving transition. Local business time cần policy cho giờ bị lặp và giờ không tồn tại.
+
+Multiple schedulers không đồng nghĩa mỗi replica chủ động tạo một execution. Coordination qua shared storage giữ recurring scheduling ở cấp cluster. Job method vẫn cần idempotency vì process crash và retry độc lập với scheduler coordination.
+
+### Continuation semantics
+
+Continuation liên kết creation của job con với final state của job cha.
+
+```csharp
+var taoPdfJobId = backgroundJobClient.Enqueue<ITaoHoaDonPdfJob>(
+    job => job.ExecuteAsync(donHangId, CancellationToken.None));
+
+backgroundJobClient.ContinueJobWith<IGuiHoaDonJob>(
+    taoPdfJobId,
+    job => job.ExecuteAsync(donHangId, CancellationToken.None),
+    JobContinuationOptions.OnlyOnSucceededState);
+```
+
+`OnlyOnSucceededState` phù hợp khi job con yêu cầu output hợp lệ từ job cha. `OnAnyFinishedState` phù hợp cho cleanup hoặc notification tổng quát.
+
+Continuation là dependency ngắn giữa jobs. Workflow nhiều nhánh, compensation, manual approval và state sống nhiều ngày cần business workflow state thay vì chuỗi continuation ẩn trong technical storage.
+
+## Serialization và Job Activator
+
+### Invocation compatibility
+
+Hangfire serialize type identity, method identity, parameter types và argument values. Payload đang chờ tạo một compatibility contract giữa producer version và worker version.
+
+Các thay đổi có blast radius tới queued jobs:
+
+- Đổi namespace hoặc assembly của job type.
+- Đổi interface implementation registration.
+- Đổi method name hoặc parameter list.
+- Đổi argument DTO làm JSON cũ không deserialize.
+- Xóa constructor dependency khỏi DI hoặc thiếu registration mới.
+
+Rolling deployment an toàn dùng expand-and-contract:
+
+```text
+worker V2 hiểu payload V1 và V2
+  -> producer bắt đầu ghi V2
+  -> V1 queue, scheduled jobs và retries drain
+  -> worker loại support V1
+```
+
+### Argument design
+
+Argument là durable message contract, không phải tiện ích truyền object giữa hai method.
+
+| Argument | Đặc tính |
+| --- | --- |
+| `donHangId` | Nhỏ, ổn định, worker đọc state mới nhất. |
+| `tenantId`, `shopId` | Khôi phục execution scope khi không thể suy ra an toàn từ aggregate ID. |
+| Entity graph | Payload lớn, stale state, dễ vỡ serialization. |
+| Access token | Secret bị persist và hết hạn trước execution. |
+| Stream/connection/DbContext | Không serialize được và gắn với process cũ. |
+
+Payload size ảnh hưởng storage growth, Dashboard exposure và serialization latency. Business snapshot chỉ được truyền khi snapshot immutability là requirement rõ ràng; khi đó contract dùng DTO versioned thay vì entity.
+
+### DI scope
+
+Job Activator tạo scope cho từng execution. Job instance và scoped dependencies sống trong scope đó:
+
+```text
+Execution attempt
+  -> IServiceScope
+      -> Job instance
+      -> DbContext
+      -> repositories
+      -> scoped tenant context
+  -> dispose scope
+```
+
+Retry attempt mới tạo scope mới. Change tracker, transaction và scoped cache từ attempt trước không tồn tại. Singleton không được giữ scoped dependency hoặc mutable tenant state.
+
+## Retry mechanics
+
+### Failure classification
+
+Retry policy bắt đầu từ error taxonomy:
+
+| Failure | Ví dụ | Policy |
+| --- | --- | --- |
+| Transient | timeout, connection reset, HTTP 429, temporary 5xx | Retry với backoff và giới hạn attempts. |
+| Permanent input | email sai format, shop không tồn tại | Fail ngay; sửa dữ liệu hoặc bỏ job. |
+| Permanent configuration | thiếu API key, route cấu hình sai | Fail và alert; retry tự động chỉ tạo noise. |
+| Concurrency conflict | optimistic conflict, duplicate claim | Reload/re-evaluate hoặc coi operation đã hoàn tất. |
+| Unknown outcome | timeout sau external request | Query provider/idempotency record trước retry. |
+
+```csharp
+[AutomaticRetry(
+    Attempts = 5,
+    DelaysInSeconds = new[] { 10, 30, 120, 300, 900 },
+    OnAttemptsExceeded = AttemptsExceededAction.Fail)]
+public Task ExecuteAsync(Guid donHangId, CancellationToken cancellationToken)
+{
+    // ...
+}
+```
+
+Backoff giảm request amplification khi dependency lỗi diện rộng. Jitter cần được bổ sung ở layer phù hợp nếu nhiều jobs có cùng failure time và provider/filter hiện tại không tạo jitter.
+
+### Retry boundary
+
+Retry toàn method lặp lại mọi bước trước điểm lỗi:
+
+```text
+Attempt 1
+  reserve stock        success
+  create invoice       success
+  send email           timeout
+
+Attempt 2
+  reserve stock        duplicate risk
+  create invoice       duplicate risk
+  send email           retry
+```
+
+Mỗi stage có idempotency riêng hoặc workflow state ghi nhận stage đã hoàn tất. Một job quá rộng làm retry boundary lớn và tăng số side effect cần deduplicate. Nhiều job quá nhỏ làm orchestration phức tạp. Boundary phù hợp thường trùng một operation có outcome và idempotency key rõ ràng.
+
+### Poison job
+
+Poison job lặp lại permanent failure trên mọi attempt. Dấu hiệu gồm cùng exception type/message, duration ngắn và attempts tăng đều.
+
+Operational handling gồm:
+
+1. Dừng automatic retry khi đã phân loại permanent.
+2. Bảo toàn job ID, business key và failure reason.
+3. Sửa configuration, code hoặc input source.
+4. Retry có kiểm soát sau khi precondition đã thay đổi.
+5. Reconciliation business state sau execution.
+
+Delete technical job không rollback side effect hoặc thay đổi business state.
+
+## Concurrency control
+
+### Worker concurrency
+
+Tổng execution concurrency bằng tổng worker count của mọi active servers nghe cùng queues.
+
+```text
+3 replicas × 8 workers = tối đa 24 concurrent executions
+```
+
+Capacity model cho I/O-bound jobs:
+
+```text
+requiredConcurrency ≈ arrivalRate × averageDuration
+```
+
+Little's Law cho baseline sizing không thay load test. Connection pool, external rate limit, MySQL lock time và tail latency tạo giới hạn thấp hơn công thức CPU mặc định.
+
+### Method-level exclusion
+
+`DisableConcurrentExecution` giảm concurrent invocation của cùng method qua distributed coordination. Cơ chế này hữu ích cho maintenance task nhưng không tạo exactly-once guarantee.
+
+Các giới hạn:
+
+- Lock lifetime phụ thuộc storage connection/lease.
+- Process hoặc network failure làm ownership trở nên không chắc chắn.
+- Method-level key có thể serialize toàn bộ tenants và shops không cần thiết.
+- Side effect ngoài storage không trở thành atomic.
+
+Resource-level concurrency thuộc business storage. Ví dụ unique constraint, optimistic version hoặc atomic conditional update bảo vệ đúng aggregate/resource scope.
+
+### Tenant-scoped concurrency
+
+Một global recurring job đồng bộ menu có thể tạo contention giữa tenants. Phân scope theo tenant/shop cho phép isolation và capacity control:
+
+```text
+queue: menu-sync
+business key: {tenantId}:{shopId}:{menuVersion}
+unique execution key: sync-menu:{tenantId}:{shopId}:{menuVersion}
+```
+
+Queue vẫn là shared execution channel; unique key và query predicate mới bảo vệ business scope.
+
+## Cancellation mechanics
+
+### Cancellation sources
+
+Execution token có thể được signal bởi server shutdown, job deletion/state change hoặc cancellation request được Hangfire quan sát qua storage. Token không phải `RequestAborted` của HTTP request đã enqueue job.
+
+Cancellation delivery có polling latency. Khoảng polling ngắn tăng responsiveness và storage reads; khoảng dài giảm storage load và kéo dài shutdown/cancel reaction.
+
+### Safe cancellation points
+
+```csharp
+public async Task ExecuteAsync(Guid donHangId, CancellationToken cancellationToken)
+{
+    var donHang = await _repository.GetAsync(donHangId, cancellationToken);
+
+    cancellationToken.ThrowIfCancellationRequested();
+    await _documentStore.UploadAsync(donHangId, cancellationToken);
+
+    cancellationToken.ThrowIfCancellationRequested();
+    await _repository.MarkDocumentReadyAsync(donHangId, cancellationToken);
+}
+```
+
+Safe point nằm giữa các stage có outcome bền vững. Cancellation giữa external side effect và persistence tạo unknown outcome giống process crash.
+
+`OperationCanceledException` phải đi ra khỏi job method để execution pipeline ghi nhận cancellation/failure semantics phù hợp. Catch để thêm context log vẫn cần rethrow:
+
+```csharp
+try
+{
+    await ExecuteCoreAsync(cancellationToken);
+}
+catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+{
+    _logger.LogInformation("Job cancellation observed");
+    throw;
+}
+```
+
+### Business cancellation
+
+Hangfire technical state có retention và không phải business audit. Yêu cầu “hủy xuất báo cáo” cần business state:
+
+```text
+Pending -> CancellationRequested -> Cancelled
+Pending -> Processing -> Completed
+Processing -> CancellationRequested -> Cancelled | Completed
+```
+
+Race giữa completion và cancellation được giải quyết bằng atomic state transition hoặc optimistic concurrency trên business record.
 
 ## Multiple instances
 
@@ -672,6 +1045,219 @@ Worker limit, queue isolation, backoff và circuit/rate policy giới hạn ampl
 #### Manual retry sau timeout
 
 Timeout không chứng minh provider chưa xử lý request. Manual retry payment hoặc notification dựa trên provider status và idempotency record, không chỉ technical state của Hangfire.
+
+## Schema lifecycle và retention
+
+### Schema installation
+
+Storage provider cần physical tables và indexes trước khi Client hoặc Server hoạt động. Hai execution modes có mục tiêu khác nhau:
+
+| Mode | `PrepareSchemaIfNecessary` | Database identity |
+| --- | --- | --- |
+| Local development | `true` | Có quyền tạo/thay đổi object. |
+| Production runtime | `false` | Chỉ có quyền DML cần cho Hangfire. |
+| Deployment migration | Không chạy application server | Identity riêng có quyền DDL. |
+
+Auto schema creation trong mọi production replica tạo startup coupling giữa application availability và DDL permission. Deployment migration tách schema change khỏi runtime startup và cho phép review/rollback procedure rõ ràng.
+
+### Table prefix consistency
+
+`TablesPrefix` là physical namespace. Producer và worker dùng prefix khác nhau hoạt động như hai Hangfire systems độc lập dù cùng connection string:
+
+```text
+API prefix     = Hangfire
+Worker prefix  = FoodJobs
+
+API enqueue vào HangfireJob...
+Worker poll FoodJobsJob...
+Kết quả: enqueue thành công, không job nào được xử lý
+```
+
+Prefix là immutable deployment contract trừ khi có data migration đầy đủ.
+
+### Retention model
+
+Succeeded jobs và monitoring data không tồn tại vô hạn. Expiration manager xóa record theo expiration metadata và provider interval.
+
+Retention tạo trade-off:
+
+```text
+retention dài
+  -> điều tra lịch sử tốt hơn
+  -> storage, index và cleanup cost lớn hơn
+
+retention ngắn
+  -> storage nhỏ hơn
+  -> mất technical evidence sớm hơn
+```
+
+Business audit không phụ thuộc retention của Hangfire. Thông tin pháp lý, thanh toán, lịch sử trạng thái đơn hàng và operator action nằm trong business audit store.
+
+### Index và storage growth
+
+Growth rate phụ thuộc enqueue throughput, state transitions trên mỗi job, retries, argument size và retention:
+
+```text
+rowsPerDay ≈ jobsPerDay × (job row + state rows + queue/parameter/counter rows)
+```
+
+Retry-heavy workload tăng `State` nhanh hơn số business operations. Dashboard query chậm có thể xuất phát từ storage size, index statistics, counter aggregation hoặc list limit; tăng web timeout không xử lý nguyên nhân.
+
+## Dashboard operation model
+
+### Server view
+
+Server view trả lời ba câu hỏi:
+
+1. Process nào còn heartbeat?
+2. Mỗi process có bao nhiêu workers?
+3. Process lắng nghe queues nào?
+
+Server heartbeat cũ không tự động chứng minh machine chết; network partition hoặc MySQL connectivity failure tạo cùng biểu hiện. Application log và infrastructure health hoàn thiện chẩn đoán.
+
+### Queue view
+
+Queue length là snapshot backlog. Oldest-job age biểu diễn user impact tốt hơn khi arrival rate thay đổi.
+
+```text
+Queue length = 10.000, throughput = 5.000/minute
+  -> backlog có thể được giải phóng trong khoảng 2 phút
+
+Queue length = 100, oldest age = 2 giờ
+  -> queue có thể thiếu worker hoặc chứa poison/blocked workload
+```
+
+Dashboard không mặc định cung cấp đầy đủ SLO calculation. Metrics pipeline cần record enqueue time, start time và final state để tính percentile.
+
+### Processing view
+
+Processing duration được đối chiếu với job-specific expectation. Một export 20 phút có thể bình thường; một notification 20 phút là stalled dependency hoặc timeout policy thiếu.
+
+Processing job trên server không còn heartbeat có khả năng chờ provider recovery. Manual requeue trước recovery có thể tạo concurrent duplicate execution.
+
+### Failed và retry view
+
+Investigation record tối thiểu:
+
+```text
+Hangfire jobId
+tenantId / shopId
+business key
+job type
+current state
+state history
+attempt number
+exception type
+external request/idempotency key
+worker serverId
+```
+
+Exception message không đủ để phân loại unknown outcome. Timeout sau external call cần provider lookup hoặc reconciliation.
+
+### Operator actions
+
+| Action | Technical effect | Business consequence |
+| --- | --- | --- |
+| Retry/Requeue | Tạo execution attempt mới | Side effect có thể lặp. |
+| Delete | Chuyển hoặc loại job khỏi processing flow | Không rollback business data. |
+| Trigger recurring | Tạo execution ngoài schedule thông thường | Có thể chạy song song execution đang tồn tại. |
+| Change queue/config | Thay worker routing | Không migrate job nếu provider/API không thực hiện transition tương ứng. |
+
+Operator identity, reason, timestamp, job ID và business key thuộc audit record. Dashboard button không thay approval policy cho payment, refund hoặc document issuance.
+
+## Configuration derivation
+
+Một production configuration được suy ra từ workload contract thay vì sao chép default:
+
+```text
+Job type: GuiXacNhanDonHang
+arrival rate: 20 jobs/s peak
+average duration: 300 ms
+p95 duration: 1.2 s
+external limit: 50 requests/s
+start SLO: 30 s
+retry: 10s, 30s, 2m, 5m
+idempotency: gui-xac-nhan:{donHangId}
+queue: notification
+```
+
+Baseline concurrency từ average workload:
+
+```text
+20 jobs/s × 0.3 s = 6 concurrent executions
+```
+
+P95 burst, retry traffic và headroom có thể đưa baseline lên 10–12 workers toàn cluster, vẫn thấp hơn external limit 50 requests/s. Nếu có ba replicas, `WorkerCount = 4` tạo tổng 12 slots.
+
+Polling interval xuất phát từ start SLO. SLO 30 giây không yêu cầu polling 100 ms; 5 giây để lại phần lớn budget cho queue wait và execution while giảm MySQL polling pressure.
+
+Queue separation xuất phát từ resource profile:
+
+| Queue | Workload | Constraint |
+| --- | --- | --- |
+| `critical` | cập nhật deadline ngắn | latency và business priority |
+| `notification` | email/SMS | provider rate limit |
+| `export` | PDF/Excel | CPU, memory, object storage |
+
+Worker pool cho `export` có concurrency thấp để export không chiếm connection/CPU của notification.
+
+## Verification strategy
+
+### Business method tests
+
+Job class được kiểm thử như application service, không cần Hangfire runtime cho domain branches:
+
+```text
+DonHang tồn tại, chưa gửi
+  -> provider được gọi với idempotency key đúng
+  -> business state được cập nhật
+
+DonHang đã gửi
+  -> method return
+  -> provider không được gọi
+
+Provider transient failure
+  -> exception đi ra execution boundary
+  -> state không được đánh dấu hoàn tất
+```
+
+### Storage integration tests
+
+Integration test với MySQL storage thật xác nhận các phần không thể chứng minh bằng mock:
+
+- Invocation serialize và deserialize qua đúng package versions.
+- DI activator resolve job và scoped dependencies.
+- Queue attribute route tới đúng worker pool.
+- Retry filter tạo scheduled transition.
+- Recurring definition dùng tenant/shop-scoped ID.
+- Hai workers không cùng claim normal queue item trong happy path.
+- Process interruption dẫn tới redelivery theo provider recovery.
+- Dashboard authorization từ chối identity không đủ role.
+
+### Failure injection
+
+Các điểm crash cần được mô phỏng độc lập:
+
+```text
+before business transaction commit
+after business commit, before enqueue
+after enqueue, before Outbox mark-dispatched
+after external side effect, before business state update
+after business state update, before Hangfire Succeeded
+```
+
+Mỗi điểm xác nhận một mechanism khác nhau: transaction rollback, Outbox, duplicate enqueue, external idempotency và redelivery handling.
+
+### Multi-instance verification
+
+Test topology chạy tối thiểu hai worker processes trên cùng MySQL storage:
+
+1. Enqueue batch có business keys duy nhất.
+2. Xác nhận workload được phân phối qua hai server identities.
+3. Kill một process giữa execution.
+4. Xác nhận abandoned job được recovery.
+5. Xác nhận business side effect không duplicate nhờ idempotency.
+6. Restart process và xác nhận heartbeat/server view phục hồi.
 
 ## Keyword reference
 
