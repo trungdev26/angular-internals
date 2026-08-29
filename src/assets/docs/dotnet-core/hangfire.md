@@ -23,11 +23,15 @@ Business case xuyên suốt là hệ thống đặt đồ ăn multi-tenant. Sau 
 
 Hangfire Core định nghĩa contract cho storage provider nhưng không triển khai MySQL storage. `Hangfire.MySqlStorage` ánh xạ thao tác lưu job, chuyển trạng thái và điều phối worker sang bảng và transaction của MySQL.
 
-`Hangfire.MySqlStorage` do cộng đồng duy trì và phát hành độc lập với Hangfire Core. Production phải cố định phiên bản của Hangfire Core, storage provider, MySQL connector và MySQL server. Mỗi lần nâng cấp cần kiểm tra lại compatibility và storage migration.
+`Hangfire.MySqlStorage` do cộng đồng duy trì và phát hành độc lập với Hangfire Core. Production phải cố định phiên bản của Hangfire Core, storage provider, MySQL connector và MySQL server.
+
+Mỗi lần nâng cấp cần kiểm tra lại compatibility của tổ hợp phiên bản này và migration tương ứng của storage.
 
 ## Background processing boundary
 
-HTTP request chỉ nên chờ các tác vụ cần thiết để tạo response. Email, tài liệu, đồng bộ hệ thống ngoài và báo cáo thường có thời gian xử lý cùng failure mode riêng. Chạy chúng trong request làm endpoint phụ thuộc vào toàn bộ các hệ thống phía sau.
+HTTP request chỉ nên chờ các tác vụ cần thiết để tạo response.
+
+Email, tài liệu, đồng bộ hệ thống ngoài và báo cáo có thời gian xử lý cùng failure mode riêng. Nếu các tác vụ này chạy trong request, endpoint sẽ phụ thuộc vào toàn bộ các hệ thống phía sau.
 
 Luồng đồng bộ giữ toàn bộ công việc trong request:
 
@@ -62,6 +66,79 @@ sequenceDiagram
 ```
 
 Việc tách nền thay đổi failure model. Hệ thống phải xử lý duplicate execution, retry, process crash, deploy compatibility và reconciliation.
+
+## Xác định yêu cầu trước khi chọn Hangfire
+
+Không phải tác vụ chạy sau HTTP response đều cần Hangfire. Công cụ phù hợp phụ thuộc vào vòng đời, độ bền và cách phục hồi của công việc.
+
+Các tham số cần xác định gồm:
+
+| Tham số | Câu hỏi thiết kế |
+| --- | --- |
+| Durability | Công việc có được phép mất khi process restart không? |
+| Start latency | Job phải bắt đầu sau bao lâu: dưới một giây, vài giây hay vài phút? |
+| Throughput | Peak jobs/second và thời gian xử lý trung bình là bao nhiêu? |
+| Retry | Failure nào được retry và tối đa bao nhiêu lần? |
+| Idempotency | Side effect có chịu được duplicate execution không? |
+| Scheduling | Tác vụ chạy ngay, chạy trễ hay chạy theo lịch? |
+| Isolation | Job có cần deploy và scale độc lập với API không? |
+| Observability | Cần xem trạng thái, history và thao tác retry thủ công không? |
+| Workflow | Đây là một method invocation hay workflow dài có nhiều bước và compensation? |
+
+### `Task.Run`, `BackgroundService` và Hangfire
+
+Ba cơ chế giải quyết ba phạm vi khác nhau:
+
+| Cơ chế | Trạng thái công việc | Phục hồi sau restart | Phù hợp |
+| --- | --- | --- | --- |
+| `Task.Run` | Chỉ nằm trong memory của process | Không | Parallel work gắn với operation hiện tại. |
+| `BackgroundService` + in-memory queue | Queue nằm trong process | Không, trừ khi ứng dụng tự bổ sung persistence | Consumer loop nội bộ cho dữ liệu có thể tạo lại. |
+| Hangfire | Job, queue và state nằm trong persistent storage | Có recovery và retry | Công việc phải tồn tại sau request hoặc process restart. |
+
+`Task.Run` trong controller không tạo background-processing system. HTTP scope có thể kết thúc trước task; scoped dependencies bị dispose; process restart làm mất task; ứng dụng cũng không có job history để phục hồi.
+
+`BackgroundService` phù hợp khi ứng dụng cần một vòng lặp chạy nền. Cơ chế này không mặc nhiên cung cấp persistent queue.
+
+Nếu tự bổ sung bảng job, claim protocol, retry, scheduling, recovery và Dashboard, ứng dụng đang xây lại các capability cốt lõi mà Hangfire đã cung cấp.
+
+### Hangfire và message broker
+
+Hangfire lưu một lời gọi method để worker .NET xử lý. Message broker lưu message để một hoặc nhiều consumers nhận theo messaging contract.
+
+| Requirement | Hangfire | Message broker |
+| --- | --- | --- |
+| Chạy method nền trong cùng hệ sinh thái .NET | Phù hợp trực tiếp | Cần consumer contract và host riêng. |
+| Delayed/recurring scheduling và Dashboard | Có sẵn | Thường cần công cụ hoặc service bổ sung. |
+| Giao tiếp giữa nhiều services/ngôn ngữ | Coupling vào .NET type/method cao | Phù hợp hơn với integration contract. |
+| Fan-out cho nhiều consumer độc lập | Không phải mô hình cốt lõi | Là use case tự nhiên của pub/sub. |
+| Long retention, replay, stream processing | Không phải mục tiêu chính | Chọn broker/stream platform theo requirement. |
+
+Multi-instance không tự động tạo nhu cầu dùng RabbitMQ. Nhiều Hangfire Servers có thể phối hợp qua cùng MySQL storage.
+
+Message broker chỉ trở thành một lựa chọn phù hợp khi hệ thống cần integration semantics, các consumer độc lập hoặc messaging topology phức tạp. Số lượng replicas không phải tiêu chí quyết định.
+
+## Lộ trình kiến trúc tối thiểu
+
+Giải pháp bắt đầu từ capability nhỏ nhất đáp ứng requirement:
+
+```text
+Tác vụ ngắn, không cần tồn tại sau process
+  -> xử lý đồng bộ hoặc Task.Run trong operation phù hợp
+
+Consumer loop nội bộ, dữ liệu có thể tạo lại
+  -> BackgroundService
+
+Job phải bền vững, có retry/schedule/history
+  -> Hangfire + MySQL storage
+
+Business commit và enqueue không được lệch nhau
+  -> Outbox + Hangfire dispatcher
+
+Integration event cho consumers độc lập
+  -> Outbox + message broker
+```
+
+Mỗi bước bổ sung một capability và một chi phí vận hành. Kiến trúc chỉ chuyển sang bước tiếp theo khi requirement hiện tại vượt quá guarantee của bước trước.
 
 ## Runtime architecture
 
@@ -786,6 +863,14 @@ Processing -> CancellationRequested -> Cancelled | Completed
 
 Race giữa completion và cancellation được giải quyết bằng atomic state transition hoặc optimistic concurrency trên business record.
 
+### Graceful shutdown
+
+Khi host dừng theo quy trình bình thường, Hangfire signal execution token và chờ workers kết thúc trong giới hạn shutdown timeout. Job method quan sát token tại safe point, lưu lại business state cần thiết rồi thoát.
+
+Graceful shutdown giảm số execution bị gián đoạn nhưng không loại bỏ crash.
+
+Process có thể bị kill, máy chủ có thể hỏng hoặc kết nối storage có thể mất trước khi cleanup chạy. Vì vậy recovery và idempotency vẫn phải đúng khi shutdown hook không được thực thi.
+
 ## Multiple instances
 
 ### Shared-storage topology
@@ -970,24 +1055,7 @@ WHERE id = @donHangId
   AND tenantId = @tenantId;
 ```
 
-## Cancellation và shutdown
-
-Cancellation trong Hangfire là cooperative cancellation. Hangfire phát tín hiệu qua `CancellationToken`; business method kết thúc tại safe point và truyền token xuống I/O API.
-
-```csharp
-public async Task ExecuteAsync(Guid donHangId, CancellationToken cancellationToken)
-{
-    var donHang = await _repository.GetAsync(donHangId, cancellationToken);
-    cancellationToken.ThrowIfCancellationRequested();
-    await _emailClient.SendAsync(donHang, cancellationToken);
-}
-```
-
-Cancellation không rollback side effect đã hoàn tất. Sau khi provider nhận request, execution tiếp theo dựa trên idempotency hoặc reconciliation.
-
-Graceful shutdown cho worker thời gian quan sát cancellation và trả job về trạng thái có thể recovery. Kill đột ngột vẫn thuộc failure model.
-
-## Dashboard
+## Dashboard và quyền truy cập
 
 ### Information model
 
@@ -1056,7 +1124,7 @@ app.UseHangfireDashboard("/hangfire", new DashboardOptions
 
 Job arguments không chứa password, access token hoặc dữ liệu cá nhân không cần thiết. Retry, delete và manual trigger thuộc audit trail vận hành.
 
-## Production operation
+## Vận hành production
 
 ### Deployment compatibility
 
@@ -1168,7 +1236,7 @@ rowsPerDay ≈ jobsPerDay × (job row + state rows + queue/parameter/counter row
 
 Retry-heavy workload tăng `State` nhanh hơn số business operations. Dashboard query chậm có thể xuất phát từ storage size, index statistics, counter aggregation hoặc list limit; tăng web timeout không xử lý nguyên nhân.
 
-## Dashboard operation model
+## Điều tra vận hành qua Dashboard
 
 ### Server view
 
@@ -1230,7 +1298,7 @@ Exception message không đủ để phân loại unknown outcome. Timeout sau e
 
 Operator identity, reason, timestamp, job ID và business key thuộc audit record. Dashboard button không thay approval policy cho payment, refund hoặc document issuance.
 
-## Configuration derivation
+## Suy ra cấu hình từ tải thực tế
 
 Một production configuration được suy ra từ workload contract thay vì sao chép default:
 
@@ -1266,7 +1334,7 @@ Queue separation xuất phát từ resource profile:
 
 Worker pool cho `export` có concurrency thấp để export không chiếm connection/CPU của notification.
 
-## Verification strategy
+## Chiến lược kiểm chứng
 
 ### Business method tests
 
@@ -1323,6 +1391,150 @@ Test topology chạy tối thiểu hai worker processes trên cùng MySQL storag
 4. Xác nhận abandoned job được recovery.
 5. Xác nhận business side effect không duplicate nhờ idempotency.
 6. Restart process và xác nhận heartbeat/server view phục hồi.
+
+## Khi Hangfire không còn là boundary phù hợp
+
+Hangfire phù hợp khi application cần lưu và thực thi các method của .NET dưới dạng job. Giới hạn xuất hiện khi requirement chuyển từ background method execution sang distributed messaging hoặc workflow orchestration.
+
+### Consumer độc lập
+
+Một job gửi email có một worker và một outcome rõ ràng. Một business event như `DonHangDaHoanThanh` có thể cần nhiều consumers:
+
+```text
+DonHangDaHoanThanh
+  -> Billing
+  -> Notification
+  -> Analytics
+  -> External Integration
+```
+
+Nếu các consumers cần deploy, scale, retry và retention độc lập, một integration event qua message broker tạo boundary rõ hơn invocation của một Hangfire method.
+
+### Hợp đồng không phụ thuộc .NET type
+
+Hangfire invocation chứa type và method identity của .NET. Cách biểu diễn này phù hợp giữa producer và worker cùng codebase hoặc cùng release contract.
+
+Khi consumers sử dụng ngôn ngữ khác hoặc thuộc services có release cycle độc lập, message schema ổn định phù hợp hơn .NET method signature. Integration contract khi đó cần versioning, ownership và compatibility policy riêng.
+
+### Fan-out, replay và stream processing
+
+Hangfire queue hướng tới việc một worker xử lý một job. Các requirement sau thuộc messaging hoặc streaming platform:
+
+- Một event được nhiều consumer groups xử lý độc lập.
+- Event được lưu dài hạn để replay.
+- Consumer tự quản lý offset.
+- Xử lý stream theo partition và ordering key.
+- Tái tạo projection từ event history.
+
+Việc bổ sung các capability này bằng bảng và filters riêng làm Hangfire storage trở thành một message platform tự xây dựng.
+
+### Workflow dài hạn
+
+Continuation biểu diễn dependency ngắn giữa jobs. Workflow có manual approval, timer nhiều ngày, compensation và nhiều nhánh cần business state machine hoặc workflow engine.
+
+```text
+PendingPayment
+  -> Paid
+  -> Preparing
+  -> Delivering
+  -> Completed
+
+PaymentFailed
+  -> ReleaseInventory
+  -> Cancelled
+```
+
+Các trạng thái trên là business state và phải tồn tại độc lập với retention của Hangfire technical states.
+
+## Abstraction theo capability
+
+Application layer không phụ thuộc trực tiếp vào tên technology như `IMySqlHangfireService` hoặc `IRabbitMqService`. Interface mô tả capability và guarantee mà use case cần.
+
+### Background job capability
+
+Nếu application cần lập lịch một tác vụ nội bộ:
+
+```csharp
+public interface IBackgroundJobScheduler
+{
+    string Enqueue<TJob>(Expression<Func<TJob, Task>> operation);
+}
+```
+
+Infrastructure adapter có thể dùng Hangfire. Interface này chỉ phù hợp khi application thực sự cần che Hangfire API hoặc sở hữu một contract riêng.
+
+Nếu chỉ một vài composition-root hoặc infrastructure handlers enqueue job, sử dụng trực tiếp `IBackgroundJobClient` đơn giản hơn. Trường hợp đó chưa cần thêm abstraction.
+
+### Integration event capability
+
+Requirement “phát một integration event bền vững cho consumers độc lập” có semantic khác background method execution:
+
+```csharp
+public interface IIntegrationEventPublisher
+{
+    Task PublishAsync(
+        IntegrationEvent message,
+        CancellationToken cancellationToken);
+}
+```
+
+Hai interfaces không được gộp thành `IMessageService`. Background job mang method-invocation semantics; integration event mang durable-message semantics. Interface chung sẽ che mất guarantee mà caller cần hiểu.
+
+### Quy tắc thay đổi
+
+Adapter có thể che thay đổi implementation khi semantic giữ nguyên:
+
+```text
+Hangfire MySQL provider A
+  -> Hangfire MySQL provider B
+
+semantic vẫn là persistent background job
+```
+
+Adapter không nên che thay đổi semantic:
+
+```text
+background method invocation
+  -> durable integration event cho nhiều consumers
+```
+
+Trường hợp thứ hai cần capability và contract mới. Việc giữ nguyên interface chỉ để giảm số file sửa sẽ làm application hiểu sai delivery guarantee.
+
+## Khung quyết định thiết kế
+
+Quy trình thiết kế một background-processing requirement:
+
+```text
+Business operation
+  -> xác định phần bắt buộc hoàn thành trước response
+  -> xác định phần có thể xử lý sau
+  -> định lượng throughput, latency và durability
+  -> chọn giải pháp nhỏ nhất đáp ứng guarantee
+  -> xác định retry boundary và idempotency key
+  -> xác định transaction gap và nhu cầu Outbox
+  -> xác định topology single/multiple instances
+  -> thiết kế metrics, Dashboard access và recovery runbook
+  -> chỉ nâng cấp khi requirement vượt guarantee hiện tại
+```
+
+Decision record tối thiểu cho một job:
+
+```text
+Job: GuiXacNhanDonHang
+Trigger: DonHang committed
+Queue: notification
+Start SLO: 30 seconds
+Peak rate: 20 jobs/second
+Retryable: timeout, 429, selected 5xx
+Permanent: invalid recipient, missing configuration
+Idempotency key: gui-xac-nhan:{donHangId}
+Tenant source: DonHang.tenantId
+Recovery: reconciliation by business status
+Storage: shared MySQL Hangfire database
+Worker topology: 3 replicas × 4 workers
+```
+
+Từ record này, `WorkerCount`, queue, retry, storage và monitoring đều có căn cứ. Configuration không còn là tập giá trị được sao chép từ một dự án khác.
 
 ## Keyword reference
 
