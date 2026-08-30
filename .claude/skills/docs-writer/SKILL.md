@@ -7,6 +7,44 @@ description: Use when writing, editing, or reviewing technical documents under s
 
 Write in the style of current Angular documentation, React documentation, and MDN. Produce a coherent technical lesson, not a collection of notes.
 
+## Discovery-driven chapter structure
+
+For architecture, infrastructure, framework, database, messaging, concurrency, and distributed-system topics, build one causal argument instead of listing concepts. Use one realistic scenario that grows throughout the chapter.
+
+The default reasoning arc is:
+
+```text
+Working system without the concept
+→ new requirement or load appears
+→ simplest intuitive solution
+→ exact condition where that solution still works
+→ reproducible failure window or operational ceiling
+→ invariant the system must preserve
+→ concept/mechanism introduced to protect that invariant
+→ minimal installation and working implementation
+→ observe the mechanism through output, state, logs, metrics, or UI
+→ remaining limitation
+→ next mechanism
+```
+
+Do not begin with a catalogue of components such as `Connection`, `Channel`, `Exchange`, `Queue`, and `Binding`. First establish the problem that makes the overall abstraction necessary. Introduce each component at the point where the running system needs its responsibility.
+
+For every major mechanism, answer these questions in the prose, code, and diagrams:
+
+| Question | Required evidence |
+|---|---|
+| What problem exists before this mechanism? | A concrete business or runtime scenario |
+| What would the first intuitive implementation look like? | Minimal code or execution flow |
+| Why is that implementation insufficient? | Exact failure window, race, bottleneck, or lifecycle event |
+| What invariant must remain true? | A precise correctness statement |
+| How does the mechanism protect it? | Step-by-step runtime trace |
+| What does the mechanism not guarantee? | The next remaining boundary |
+| How can the reader verify it? | Observable output, UI state, query result, test, or metric |
+
+Basic usage must precede deeper mechanics. The reader should be able to install the dependency, run a minimal example, observe its result, and understand the everyday API before reaching retry, concurrency, failure recovery, scaling, or production tuning.
+
+When a document covers production code, use the repository's actual runtime version, packages, configuration, and project boundaries. Explain why each class belongs in its layer and trace configuration through dependency injection to the executed code. Do not present pseudocode as if it were the current implementation; label reference models and future upgrade paths explicitly.
+
 ## Mandatory rules
 
 - **MUST**: match the actual page format of angular.dev/React.dev/MDN, not just their tone. This has been corrected repeatedly — tone alone (rule below) is not enough. Concretely:
@@ -28,6 +66,7 @@ Write in the style of current Angular documentation, React documentation, and MD
 - State the plain-language theory or definition of a concept before any code that demonstrates it. The reader must know what a code block is about to prove before reading it — never open a section with unexplained code that only gets named afterward.
 - The first example for a concept must be simple enough that someone who just read the definition can trace it by hand: no unrelated advanced syntax (generics, utility types, uncommon APIs) mixed into it. Save idiomatic/advanced implementations for the deeper extension that follows.
 - Keep each paragraph focused on one claim and connect dependent ideas explicitly.
+- Every major heading, especially an H2-level topic shift, must open by connecting to what the previous section established — state the conclusion just reached and the question it leaves open — not a bare topic announcement (`Phần này nói về X`, `Phần này mô tả...`) and not a fact that could equally open any section. A reader moving from one heading to the next should feel one argument continuing, at a level a newcomer to that argument (not just to the syntax) can follow — not a new, independent chapter starting. This applies regardless of the reader's seniority: the throughline must hold for someone reading the document top to bottom for the first time.
 - Prefer one running example that grows one concept at a time.
 - After the base definition and example, extend into deeper mechanics, edge cases, or trade-offs under their own subheading — a distinct "how it really works" layer, the way React.dev uses "Deep Dive" callouts and angular.dev uses advanced-usage sections following the basic explanation. Never label this by audience ("dành cho senior", "nâng cao dành cho middle") — frame it by what it covers (mechanism, edge case, trade-off), not by who it's for.
 - Do not label document prose by junior, middle, senior, level, or cấp độ.
@@ -59,3 +98,5 @@ Before completing a document:
 7. Build or render the site when formatting, routes, or demos changed.
 8. Confirm installation/setup and the everyday API surface are covered before the advanced material — not just the mechanism deep-dive.
 9. Skim only the headings, bold terms, tables, and code — if that skim doesn't convey the page, convert some running prose into tables/bullets/callouts per the MUST rule above.
+10. Read only the heading plus opening sentence of every major section, in document order. Confirm it reads as one continuing argument — each opening line traces back to the prior section's conclusion — not a list of independent topics. This is a distinct check from 1b: a page can pass every sentence-level check and still read as disconnected chapters at the heading level.
+11. Grep every `###`/`####` heading and check what immediately follows it. A heading followed directly by a fenced code block or diagram with no sentence in between is a violation of rule 28 even if the rest of the document is fine — this slips past checks 1b and 10 because it's a structural gap, not a wording one. Add one sentence stating what the block shows or proves before it.
