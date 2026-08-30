@@ -47,6 +47,8 @@ When a document covers production code, use the repository's actual runtime vers
 
 Use noun phrases for document titles and headings. A heading names the concept or mechanism; the prose below it carries the causal transition from the previous section. Avoid narrative headings such as `Khi chưa có Message Queue`, `X ra đời để làm gì?`, `Theo dõi lần chạy đầu tiên`, or `X vẫn chưa giải quyết Y`.
 
+Edit for reading rhythm after the reasoning is complete. One paragraph carries one claim. When a paragraph combines a scenario, a list of actors or timings, and a conclusion, split it into three visible units: the scenario in prose, the named values in bullets or a table, and the conclusion in its own paragraph. A sequence of short sentences is not automatically readable if every sentence introduces a new category the reader must retain.
+
 Mermaid is enabled globally in `MarkdownDocComponent`. Use fenced `mermaid` blocks for architecture, sequence, state, and data-flow diagrams when a diagram makes the relationship easier to understand. Keep labels short, validate every diagram through the rendered route, and do not replace a short explanation with a decorative diagram.
 
 ## Mandatory rules
