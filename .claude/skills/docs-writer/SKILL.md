@@ -45,6 +45,10 @@ Basic usage must precede deeper mechanics. The reader should be able to install 
 
 When a document covers production code, use the repository's actual runtime version, packages, configuration, and project boundaries. Explain why each class belongs in its layer and trace configuration through dependency injection to the executed code. Do not present pseudocode as if it were the current implementation; label reference models and future upgrade paths explicitly.
 
+Use noun phrases for document titles and headings. A heading names the concept or mechanism; the prose below it carries the causal transition from the previous section. Avoid narrative headings such as `Khi chưa có Message Queue`, `X ra đời để làm gì?`, `Theo dõi lần chạy đầu tiên`, or `X vẫn chưa giải quyết Y`.
+
+Mermaid is enabled globally in `MarkdownDocComponent`. Use fenced `mermaid` blocks for architecture, sequence, state, and data-flow diagrams when a diagram makes the relationship easier to understand. Keep labels short, validate every diagram through the rendered route, and do not replace a short explanation with a decorative diagram.
+
 ## Mandatory rules
 
 - **MUST**: match the actual page format of angular.dev/React.dev/MDN, not just their tone. This has been corrected repeatedly — tone alone (rule below) is not enough. Concretely:

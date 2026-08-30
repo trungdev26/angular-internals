@@ -45,7 +45,9 @@
               "./node_modules/prismjs/themes/prism-tomorrow.css",
               "src/styles.css"
             ],
-            "scripts": []
+            "scripts": [
+              "node_modules/mermaid/dist/mermaid.min.js"
+            ]
           },
           "configurations": {
             "production": {
@@ -125,7 +127,9 @@
               "./node_modules/prismjs/themes/prism-tomorrow.css",
               "src/styles.css"
             ],
-            "scripts": []
+            "scripts": [
+              "node_modules/mermaid/dist/mermaid.min.js"
+            ]
           }
         }
       }

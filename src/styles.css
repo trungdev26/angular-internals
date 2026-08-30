@@ -230,6 +230,42 @@ html[data-theme='dark'] .markdown-body hr {
   background-color: #363c47;
 }
 
+html[data-theme='dark'] .markdown-body .mermaid :is(
+  .flowchart-link,
+  .messageLine0,
+  .messageLine1,
+  .relationshipLine
+) {
+  stroke: #cbd5e1 !important;
+}
+
+html[data-theme='dark'] .markdown-body .mermaid :is(.marker, .arrowheadPath) {
+  fill: #cbd5e1 !important;
+  stroke: #cbd5e1 !important;
+}
+
+html[data-theme='dark'] .markdown-body .mermaid marker path {
+  fill: #cbd5e1 !important;
+  stroke: #cbd5e1 !important;
+}
+
+html[data-theme='dark'] .markdown-body .mermaid :is(
+  text,
+  .nodeLabel,
+  .edgeLabel,
+  .messageText,
+  .loopText,
+  .labelText
+) {
+  color: #f1f5f9 !important;
+  fill: #f1f5f9 !important;
+}
+
+html[data-theme='dark'] .markdown-body .mermaid .edgeLabel rect {
+  fill: #20242b !important;
+  opacity: 1 !important;
+}
+
 html[data-theme='dark'] app-markdown-doc .markdown-body pre,
 html[data-theme='dark'] app-markdown-doc .markdown-body pre[class*='language-'],
 html[data-theme='dark'] app-markdown-doc .markdown-body code[class*='language-'] {
