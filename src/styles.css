@@ -189,6 +189,8 @@ html[data-theme='dark'] .markdown-body h1,
 html[data-theme='dark'] .markdown-body h2,
 html[data-theme='dark'] .markdown-body h3,
 html[data-theme='dark'] .markdown-body h4,
+html[data-theme='dark'] .markdown-body h5,
+html[data-theme='dark'] .markdown-body h6,
 html[data-theme='dark'] .markdown-body strong {
   color: #f3f4f7;
 }
@@ -205,9 +207,9 @@ html[data-theme='dark'] .markdown-body blockquote {
   border-left-color: #858bd0;
 }
 html[data-theme='dark'] .markdown-body :not(pre) > code {
-  color: #e98ca7;
-  background: #271b23;
-  border-color: #432a35;
+  color: #f9a8d4;
+  background: #1e293b;
+  border-color: #475569;
 }
 html[data-theme='dark'] .markdown-body table tr {
   background: transparent;
@@ -252,18 +254,63 @@ html[data-theme='dark'] .markdown-body .mermaid marker path {
 html[data-theme='dark'] .markdown-body .mermaid :is(
   text,
   .nodeLabel,
+  .nodeLabel p,
+  .nodeLabel span,
   .edgeLabel,
+  .edgeLabel p,
+  .edgeLabel span,
   .messageText,
   .loopText,
   .labelText
 ) {
-  color: #f1f5f9 !important;
-  fill: #f1f5f9 !important;
+  color: #e2e8f0 !important;
+  fill: #e2e8f0 !important;
+  font-weight: 500;
 }
 
 html[data-theme='dark'] .markdown-body .mermaid .edgeLabel rect {
-  fill: #20242b !important;
+  fill: #1e293b !important;
+  stroke: #334155 !important;
+  stroke-width: 1px !important;
+  rx: 5px;
+  ry: 5px;
   opacity: 1 !important;
+}
+
+html[data-theme='dark'] .markdown-body .mermaid .edgeLabel .label span {
+  background: #1e293b !important;
+  border: 1px solid #334155 !important;
+  border-radius: 5px !important;
+  padding: 2px 7px !important;
+  display: inline-block !important;
+}
+
+html[data-theme='dark'] .markdown-body .mermaid :is(
+  .node rect,
+  .node polygon,
+  .node circle,
+  .node ellipse,
+  .node path,
+  .actor,
+  .label-container
+) {
+  fill: #1e293b !important;
+  stroke: #64748b !important;
+  stroke-width: 1.5px !important;
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.4));
+}
+
+html[data-theme='dark'] .markdown-body .mermaid .node rect {
+  rx: 8px;
+  ry: 8px;
+}
+
+html[data-theme='dark'] .markdown-body .mermaid .cluster rect {
+  fill: #1e293b !important;
+  stroke: #475569 !important;
+  stroke-width: 1.5px !important;
+  rx: 8px;
+  ry: 8px;
 }
 
 html[data-theme='dark'] app-markdown-doc .markdown-body pre,

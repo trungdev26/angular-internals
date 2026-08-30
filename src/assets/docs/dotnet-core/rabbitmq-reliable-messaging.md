@@ -4,9 +4,9 @@ Khi khách hàng xác nhận đặt món, đơn hàng phải được lưu trư�
 
 Sau khi đơn hàng được tạo, hệ thống còn ba công việc:
 
-- thông báo cho shop;
-- gửi email xác nhận cho khách hàng;
-- chuyển dữ liệu bán hàng sang hệ thống báo cáo.
+- Thông báo cho shop.
+- Gửi email xác nhận cho khách hàng.
+- Chuyển dữ liệu bán hàng sang hệ thống báo cáo.
 
 Nếu ba công việc cùng nằm trong HTTP request, thời gian phản hồi phụ thuộc vào mọi hệ thống tham gia.
 
@@ -53,23 +53,27 @@ Mọi bước trong sơ đồ chạy tuần tự. Một lần xử lý có thể
 
 Tổng thời gian đã đạt khoảng 1,38 giây, chưa tính network fluctuation.
 
-Khi tải tăng, API không chỉ phản hồi chậm hơn. Thread và database connection còn bị giữ trong lúc chờ các hệ thống bên ngoài.
+Khi tải tăng, vấn đề không chỉ là API phản hồi chậm hơn. Thread và database connection bị giữ trong suốt thời gian chờ email provider, shop notification và reporting API phản hồi, nên tài nguyên đó không được giải phóng để phục vụ request khác.
 
-Latency chưa phải vấn đề khó nhất. Nếu đơn đã commit nhưng email timeout, API phải chọn kết quả cho request.
+Vấn đề khó hơn latency xuất hiện khi một tác vụ phụ thất bại sau khi transaction đã commit. Nếu `DonHang` đã được lưu thành công nhưng gửi email bị timeout, API phải chọn một trong hai kết quả để trả về:
 
-- Trả thất bại có thể khiến client gửi lại và tạo hai đơn.
-- Trả thành công đòi hỏi một cơ chế tiếp tục gửi email sau khi request kết thúc.
+- **Trả thất bại** — client có thể hiểu là đơn chưa được tạo và gửi lại request, dẫn tới hai đơn hàng cho cùng một lần đặt món.
+- **Trả thành công** — đúng với thực tế là đơn đã được lưu, nhưng hệ thống cần một cơ chế tiếp tục gửi email sau khi request đã kết thúc.
 
-Luồng xử lý chứa hai nhóm công việc có lifecycle khác nhau:
+Sự lựa chọn này cho thấy luồng xử lý có hai nhóm công việc với lifecycle khác nhau:
 
-- công việc quyết định kết quả của request: validate, kiểm tra invariant, tạo đơn và commit;
-- công việc có thể hoàn thành sau: gửi xác nhận, cập nhật read model, phát event cho service khác.
+- Nhóm quyết định kết quả của request: validate, kiểm tra invariant, tạo đơn và commit.
+- Nhóm có thể hoàn thành sau: gửi xác nhận, cập nhật read model, phát event cho service khác.
 
 Chỉ nhóm thứ hai là ứng viên của background processing.
 
-### 1.2 Tác vụ ngoài HTTP request
+### 1.2 Chạy nền trong cùng process
 
-Giải pháp trực giác đầu tiên thường là:
+Gửi email không quyết định kết quả của request, nên có thể tách khỏi luồng xử lý chính và chạy nền. Có vài cách tiếp cận phổ biến cho việc này:
+
+- `_ = Task.Run(() => ...)` — fire-and-forget ngay trong action.
+- `ThreadPool.QueueUserWorkItem(...)` — bản chất tương tự `Task.Run`, chỉ khác API.
+- Một `BackgroundService` đọc từ `Channel<T>` in-memory mà request ghi vào.
 
 ```csharp
 await donHangService.CreateAsync(request, cancellationToken);
@@ -79,39 +83,110 @@ _ = Task.Run(() => emailService.SendAsync(request.Email));
 return Ok();
 ```
 
-Response nhanh hơn, nhưng công việc chỉ sống trong memory của process hiện tại. Task có thể biến mất khi:
+API trả response ngay sau khi tạo đơn, không đợi `SendAsync` chạy xong. Nhưng dù chọn `Task.Run`, `ThreadPool.QueueUserWorkItem` hay `Channel` in-memory, cả ba đều có chung một điểm yếu — công việc chỉ tồn tại trong memory của process hiện tại, không được ghi lại ở bất kỳ đâu khác.
 
-- application được deployment lại;
-- process bị crash;
-- autoscaling terminate instance.
+Điểm yếu đó thể hiện rõ ngay khi `SendAsync` throw exception:
 
-Exception không có nơi quản lý tập trung. Retry không bền vững. Instance khác cũng không thể nhận phần việc còn dang dở.
+```csharp
+_ = Task.Run(async () =>
+{
+    await emailService.SendAsync(request.Email); // throw exception
+});
 
-Đây không phải lỗi của `Task.Run`. Nó được dùng sai abstraction. `Task` mô tả asynchronous work trong một process; durable job cần tồn tại độc lập với process đã tạo ra nó.
+return Ok(); // vẫn trả 200 OK
+```
 
-### 1.3 Bảng công việc trong MySQL
+Khi dùng `Task.Run` nhưng bỏ qua `await`, mọi exception phát sinh từ `SendAsync` sẽ bị cô lập hoàn toàn bên trong `Task` đó và trở thành một unobserved exception. Kể từ .NET Core, các unobserved exception này không còn làm crash process mà chỉ lặng lẽ biến mất. Kết quả là hệ thống không ghi log, không bắn alert, và không còn dấu vết nào của những email gửi thất bại.
 
-Một row `PendingJob` có thể lưu công việc để worker polling định kỳ:
+Ngay cả khi `SendAsync` không lỗi, công việc vẫn phụ thuộc vào việc process có sống đủ lâu để chạy xong hay không. Nếu process dừng giữa chừng, công việc cũng biến mất không dấu vết, hệt như trường hợp exception ở trên. Nguyên nhân dừng có thể đến từ:
+
+- **Redeployment** — ứng dụng bị khởi động lại để cập nhật phiên bản mới.
+- **Process crash** — tiến trình tự sập do một lỗi hệ thống khác.
+- **Autoscaling scale-in** — hạ tầng tự động hủy bớt instance khi giảm tải.
+
+Dù tiến trình có may mắn sống sót, giải pháp chắp vá này vẫn bộc lộ ba điểm yếu chí mạng của một kiến trúc xử lý nền (background processing):
+
+- Thiếu nơi quản lý exception tập trung.
+- Thiếu cơ chế retry khi đối tác (provider) lỗi tạm thời.
+- Không thể bàn giao công việc sang instance khác nếu instance hiện tại gặp sự cố.
+
+Suy cho cùng, gốc rễ vấn đề không nằm ở cú pháp `Task.Run` hay cách gọi API, mà nằm ở việc chọn sai tầng trừu tượng (abstraction):
+
+- `Task`, `ThreadPool` hay `Channel` in-memory chỉ là công cụ xử lý bất đồng bộ (asynchronous work) — chúng sinh ra và chết đi cùng vòng đời của một process.
+- **Gửi email** lại là một tác vụ bền vững (durable job) — nó bắt buộc phải tồn tại độc lập với process khởi tạo, sẵn sàng sống sót qua các đợt deploy, crash hay scale-in.
+
+### 1.3 Một bảng công việc ngoài process
+
+Mục 1.2 đã chỉ ra gốc rễ vấn đề: `Task`, `ThreadPool` hay `Channel` in-memory chỉ mô tả công việc sống trong memory của một process, trong khi gửi email cần là một durable job. Muốn công việc sống sót qua deploy, crash hay scale-in, nó phải được ghi lại ở một nơi tồn tại độc lập với process — và bất kỳ process nào, kể cả một process khác với process đã tạo ra nó, cũng phải đọc được.
+
+Nơi lưu trữ đó có thể là bất cứ đâu ngoài memory của process — file, cache bền vững, hay đơn giản nhất là chính database mà hệ thống đang dùng để lưu business data.
+
+Nối tiếp luồng "Giao dịch đặt món" ở mục 1.1, ghi `PendingJob` vào cùng transaction tạo `DonHang`: hai thao tác cùng commit hoặc cùng rollback, không thể có đơn mà thiếu job gửi email.
 
 ```text
 HTTP request → INSERT PendingJob → COMMIT
 worker       → SELECT pending rows → execute → mark completed
 ```
 
-Cách này hợp lý với một loại job đơn giản. Khi số worker và loại công việc tăng, application phải tự bổ sung:
+```csharp
+await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
 
-- cơ chế claim và lease;
-- retry delay và dead letter;
-- routing cho nhiều consumer;
-- backpressure, metrics và cleanup.
+var donHang = new DonHang(request);
+db.DonHang.Add(donHang);
 
-Một bảng không sai. Phạm vi trách nhiệm của nó đang dần trở thành một message broker tự viết.
+db.PendingJob.Add(new PendingJob
+{
+    JobType = "SendEmail",
+    Payload = JsonSerializer.Serialize(new { donHang.Id, request.Email }),
+    Status = "Pending",
+    CreatedAtUtc = DateTimeOffset.UtcNow
+});
 
-Đó là thời điểm cần một hạ tầng chuyên vận chuyển message.
+await db.SaveChangesAsync(cancellationToken);
+await transaction.CommitAsync(cancellationToken);
+
+return Ok();
+```
+
+Một worker chạy riêng, định kỳ đọc các job đang chờ và xử lý:
+
+```csharp
+var jobs = await db.PendingJob
+    .Where(j => j.Status == "Pending")
+    .OrderBy(j => j.CreatedAtUtc)
+    .Take(50)
+    .ToListAsync(cancellationToken);
+
+foreach (var job in jobs)
+{
+    await emailService.SendAsync(job.Payload);
+    job.Status = "Completed";
+}
+
+await db.SaveChangesAsync(cancellationToken);
+```
+
+Cách này chỉ ổn với một worker và tác vụ đơn giản. Khi hệ thống lớn hơn, bốn bài toán hóc búa sẽ xuất hiện:
+
+- **Xử lý trùng** — nhiều worker cùng nhảy vào lấy một việc, dẫn đến gửi trùng email cho khách. Phải tự viết code để "khóa" và "nhả" việc (claim, lease).
+- **Gây nghẽn khi lỗi** — khi nhà cung cấp email bị sập, hệ thống thử lại liên tục sẽ tốn tài nguyên và chặn đường các công việc khác.
+- **Dẫm chân lên nhau** — nhiều loại việc (email, báo cáo, đồng bộ) trộn chung một bảng khiến worker khó phân chia và nhận đúng việc.
+- **Phình to dữ liệu** — bảng phình lên rất nhanh, mất kiểm soát lượng việc tồn đọng và phải tự viết code để dọn rác dữ liệu.
+
+Bản thân một bảng database không sai, nhưng cố vá víu nó để giải quyết các vấn đề trên sẽ khiến nó dần trở thành một **Message Broker** tự viết — đó chính là lúc hệ thống cần được bàn giao cho một hạ tầng vận chuyển message chuyên dụng.
 
 ## 2. Message Queue và Message Broker
 
-Message Queue đặt một durable boundary giữa bên tạo công việc và bên thực hiện công việc.
+Mục 1.3 kết luận rằng gửi email cần một hạ tầng chuyên vận chuyển message, thay vì tiếp tục vá víu một bảng database. Trước khi tìm hiểu hạ tầng đó, cần phân biệt rõ hai khái niệm hay bị nhầm lẫn với nhau:
+
+- **Message Queue** — Là **hàng đợi (queue)** giữa producer và consumer: producer đưa message vào queue rồi xong việc → consumer xử lý độc lập riêng.
+- **Message Broker** — Là **hệ thống trung tâm** hiện thực hóa mô hình đó: nhận từ producer → lưu trong queue → giao cho consumer. Một broker có thể chứa nhiều queue.
+
+Ba vai trò tham gia vào mô hình này:
+
+- **Producer (Bên phát tin)** — tạo ra message, ví dụ API vừa tạo xong đơn hàng.
+- **Message Broker (Hệ thống điều phối)** — nhận, lưu trữ và giao message.
+- **Consumer (Bên xử lý)** — đọc message từ broker và thực hiện công việc, ví dụ worker gửi email.
 
 ```mermaid
 flowchart LR
@@ -120,25 +195,36 @@ flowchart LR
     C -->|acknowledge| B
 ```
 
-Producer không cần chờ consumer hoàn thành. Consumer có thể scale độc lập.
+Sự xuất hiện của Message Broker mang lại hai bước ngoặt lớn về mặt kiến trúc cho hệ thống:
 
-Khi consumer tạm dừng, message chờ trong queue thay vì mất cùng process. Broker điều phối delivery và ghi nhận message đã được xác nhận hay chưa.
+- **Decoupling** — producer không cần chờ consumer xử lý xong: client nhận phản hồi ngay, còn consumer có thể scale-out độc lập để tăng tốc khi tải tăng.
+- **Resilience** — nếu consumer gặp sự cố hoặc tạm dừng, message vẫn nằm chờ an toàn trong queue thay vì mất cùng vòng đời của process. Broker điều phối redelivery và chỉ xóa message sau khi nhận được acknowledge từ consumer.
 
-Sự tách rời này đổi failure model chứ không xóa failure:
+Việc tách producer khỏi consumer cũng không tránh khỏ những rủi ro, cụ thể như:
 
-- producer có thể không biết publish đã tới broker chưa;
-- broker có thể nhận message nhưng chưa có queue phù hợp;
-- consumer có thể xử lý xong rồi chết trước khi ACK;
-- MySQL và broker không cùng một transaction;
-- message có thể được giao nhiều lần hoặc đến khác thứ tự mong muốn.
+- Producer có thể không biết publish đã tới broker chưa.
+- Broker có thể nhận message nhưng chưa có queue phù hợp.
+- Consumer có thể xử lý xong rồi chết trước khi ACK.
+- MySQL và broker không cùng một transaction.
+- Message có thể được giao nhiều lần hoặc đến khác thứ tự mong muốn.
 
 Một hệ thống reliable không né các tình huống đó. Nó chọn invariant rõ ràng và thiết kế recovery cho từng cửa sổ lỗi.
 
+RabbitMQ, Kafka, AWS SQS hay BullMQ đều là những cách hiện thực khác nhau của Message Broker. Phần còn lại của bài tập trung vào RabbitMQ — hạ tầng đang được dùng trong production base.
+
 ## 3. Kiến trúc RabbitMQ
 
-RabbitMQ là một message broker.
+RabbitMQ chính là kiến trúc hiện thực mô hình ba bên (producer - broker - consumer) đã thảo luận ở mục 2. Nhưng khi áp dụng vào thực tế, mô hình cơ bản đó lộ ra một lỗ hổng lớn:
 
-Trong mô hình AMQP 0-9-1, producer publish message tới `Exchange`. Exchange dùng `Routing Key` và `Binding` để định tuyến message vào một hoặc nhiều `Queue`. Consumer subscribe queue và xác nhận delivery bằng `ACK`.
+- Nó mặc định mỗi message chỉ đi vào một queue duy nhất.
+- `order.created` — tên gọi cho sự kiện tạo đơn ở mục 1.1 — cần gửi đến hai hàng đợi độc lập (email và báo cáo). Nếu bắt bên gửi tự nhét tin nhắn vào từng nơi, nó buộc phải biết trước tên của tất cả các hàng đợi, dẫn đến việc phải sửa lại code liên tục mỗi khi hệ thống có thêm tính năng mới.
+- Điều này xóa mất ý nghĩa decoupling (tách rời hệ thống) mà mô hình ban đầu hướng tới.
+
+RabbitMQ giải quyết bài toán này bằng cách chèn thêm một "bộ phận phân loại thư" ở giữa, gọi là **Exchange**:
+
+- **Producer** (người gửi) — không cần biết có bao nhiêu queue đang tồn tại. Nó chỉ gửi message vào exchange, kèm một nhãn mô tả nội dung gọi là **Routing Key**, ví dụ `order.created` (đã tạo đơn hàng).
+- **Exchange** (bộ phận phân loại) — giống một bác bưu tá thông minh: dựa vào quy tắc thiết lập sẵn gọi là **Binding**, nó tự động sao chép message và chuyển vào mọi queue đã đăng ký nhận nhãn `order.created`.
+- **Consumer** (người xử lý) — mỗi bên (email worker, report worker) chỉ cần đứng chờ ở đúng queue của mình để nhận message, hoàn toàn độc lập với nhau.
 
 ```mermaid
 flowchart LR
@@ -149,34 +235,41 @@ flowchart LR
     Q2 --> R[Reporting Consumer]
 ```
 
-Exchange tạo một lớp gián tiếp quan trọng. Producer chỉ phát fact `order.created`; notification và reporting tự sở hữu queue của mình. Thêm consumer mới không buộc producer gọi thêm một HTTP endpoint.
+Nhờ vậy, producer chỉ cần phát đúng một fact `order.created`, không cần biết ai đang lắng nghe. Muốn thêm một consumer thứ ba, chỉ cần tạo thêm một queue mới và bind nó vào exchange với đúng routing key — producer không phải đổi một dòng code nào.
 
-### 3.1 Connection, Channel, Exchange, Queue và Binding
+### 3.1 Các thành phần bên trong RabbitMQ
 
-**Producer** là ứng dụng publish message. **Consumer** là ứng dụng nhận delivery và thực hiện công việc.
+Hình dung RabbitMQ như một trung tâm bưu chính số: để một bức thư đi từ producer (người gửi) đến consumer (người nhận), nó phải đi qua bốn chặng.
 
-**Connection** là TCP connection dài hạn giữa application process và RabbitMQ node. Tạo connection cho từng message gây handshake, socket churn và làm recovery phức tạp. Một process thường giữ một số ít connection dài hạn.
+#### Chặng 1 — Connection và Channel: đường cao tốc và làn đường logic
 
-**Channel** là phiên AMQP logical chạy trên connection. Channel nhẹ hơn connection. Publisher và consumer nên có channel ownership rõ ràng; không mặc định dùng một channel đồng thời từ nhiều thread.
+Trước khi gửi thư, cần có một con đường dẫn tới bưu điện.
 
-**Exchange** nhận message và định tuyến. Bốn kiểu phổ biến:
+- **Connection** (kết nối TCP) — giống một đường cao tốc vật lý nối từ ứng dụng tới RabbitMQ. Xây đường cao tốc tốn kém và mất thời gian, nên hệ thống chỉ xây một đường duy nhất rồi giữ nó luôn mở, thay vì làm lại mỗi lần gửi thư.
+- **Channel** (kênh logic) — để tránh tắc nghẽn, đường cao tốc đó được chia thành nhiều làn nhỏ. Mỗi luồng xử lý trong ứng dụng chạy trên một làn riêng — mở thêm làn mới rất nhanh, không tốn kém như xây thêm đường cao tốc.
 
-| Exchange type | Cách route | Khi phù hợp |
-|---|---|---|
-| `direct` | Routing key khớp binding key | Event name hoặc command route rõ ràng |
-| `topic` | Khớp pattern như `order.*` | Nhiều nhóm event theo namespace |
-| `fanout` | Gửi tới mọi queue đã bind | Broadcast không cần routing key |
-| `headers` | So khớp headers | Rule dựa trên metadata, ít dùng hơn |
+#### Chặng 2 — Exchange: bác bưu tá phân loại thư
 
-**Queue** giữ message chờ consumer.
+Bưu điện không bắt người gửi tự đi tìm đúng hòm thư. Người gửi chỉ ném thư vào một cái máy phân loại tự động gọi là **Exchange**, kèm theo một cái nhãn (**Routing Key**, ví dụ `order.created`). Exchange nhìn nhãn đó và áp dụng luật phân loại (**Binding**) để ném thư vào đúng những hòm thư đang chờ:
 
-Nhiều consumer cùng subscribe một queue tạo competing consumers. Mỗi message chỉ được một consumer trong nhóm nhận tại một thời điểm.
+- **Direct** (khớp chính xác) — nhãn ghi gì, ném đúng vào hòm thư ghi đúng chữ đó. Nhãn `order.created` chỉ vào hòm thư `order.created`.
+- **Topic** (khớp theo nhóm) — phân loại theo cụm từ: thư dán nhãn `order.shipping` hay `order.success` đều gom vào một chỗ nếu luật ghi `order.*`.
+- **Fanout** (phát tờ rơi) — bất kể nhãn ghi gì, Exchange nhân bản bức thư và phát đều vào mọi hòm thư đang có.
 
-Nếu một event phải đi tới hai hệ thống độc lập, mỗi hệ thống cần một queue riêng cùng bind vào exchange.
+RabbitMQ còn một kiểu thứ tư là `headers`, phân loại theo metadata thay vì nhãn, nhưng ít dùng nên không đi sâu ở đây.
 
-**Binding** là rule nối exchange với queue. **Routing Key** là giá trị producer gửi để exchange áp dụng rule đó.
+#### Chặng 3 — Queue: hòm thư chứa tin nhắn
 
-**Virtual Host** là namespace logic chứa exchange, queue, binding và permission. Nó hỗ trợ tách application hoặc environment nhưng không thay tenant isolation trong business data.
+Queue là những hòm thư vật lý, nơi thư nằm xếp hàng chờ người đến lấy. Hai quy tắc cần nhớ:
+
+- **Chia việc** (competing consumers) — nếu ba nhân viên cùng đến lấy thư ở một hòm thư duy nhất, bưu điện chia đều cho từng người để xử lý nhanh hơn (scale-out). Một bức thư chỉ có đúng một người xử lý.
+- **Tách biệt hệ thống** — nếu hai phòng ban khác nhau (email và báo cáo) cùng muốn nhận thư `order.created`, chúng không được dùng chung một hòm thư. Mỗi phòng phải có hòm thư riêng, cùng nối (bind) vào Exchange ở trên.
+
+#### Chặng 4 — Virtual Host: các tầng tòa nhà độc lập
+
+Khi nhiều môi trường (dev, staging, production) cùng dùng chung một cụm RabbitMQ, cần một cách để hòm thư của môi trường này không lẫn với môi trường khác.
+
+**Virtual Host** giống như chia tòa nhà bưu điện thành các tầng biệt lập — tầng cho dev, tầng cho production. Đứng ở tầng này, không thể nhìn thấy hay ảnh hưởng tới cấu hình, hòm thư của tầng khác. Vhost là ranh giới hạ tầng, không thay thế tenant isolation trong business data.
 
 ## 4. Cài đặt RabbitMQ
 
@@ -216,77 +309,121 @@ docker compose ps rabbitmq
 
 Hai port có hai vai trò khác nhau:
 
-- `localhost:5673`: AMQP endpoint mà .NET client kết nối;
+- `localhost:5673`: AMQP endpoint mà .NET client kết nối.
 - `http://localhost:15673`: Management UI, đăng nhập bằng `food_app / food_dev` trong local environment.
 
 Management UI chỉ hiển thị `Connections` sau khi application thực sự mở connection.
 
-Foundation tạo connection theo cơ chế lazy. Khởi động API chưa làm connection xuất hiện; readiness check hoặc lần publish đầu tiên sẽ kích hoạt kết nối.
+Foundation tạo connection theo cơ chế lazy. Khởi động API chưa làm connection xuất hiện — readiness check hoặc lần publish đầu tiên sẽ kích hoạt kết nối.
 
 ## 5. RabbitMQ Client trong .NET 6
 
+Từ mục 1 đến 4, bài đã đi từ việc phát hiện vấn đề  (gửi email cần chạy nền và cần bền vững) đến giải pháp kiến trúc (RabbitMQ, Exchange, Queue, Binding). Mục này hiện thực kiến trúc đó trong .NET 6 với luồng tạo đơn hàng.
+
+Solution này chia code thành ba tầng theo một chiều phụ thuộc duy nhất:
+
+- **Domain** — business rule thuần, không phụ thuộc gì khác.
+- **Application** — nơi định nghĩa nghiệp vụ cần làm gì (gọi là **use case**), thông qua các interface.
+- **Infrastructure** — chi tiết kỹ thuật cụ thể: database, RabbitMQ, email provider... implement các interface đó.
+
+Project ở lớp ngoài được phép reference lớp trong, nhưng chiều ngược lại thì không — Application không được reference Infrastructure.
+
+```mermaid
+flowchart LR
+    S1[5.1 Client package] --> S4[5.4 Message Publisher]
+    S2[5.2 Configuration] --> S3[5.3 Connection lifecycle]
+    S3 --> S4
+    S4 --> S5[5.5 DI và readiness]
+```
+
 ### 5.1 Client package
 
-RabbitMQ server và .NET application là hai process độc lập. Application cần client library để nói giao thức AMQP:
+RabbitMQ chạy như một service riêng biệt (xem mục 4) — application giao tiếp với nó qua mạng, không gọi hàm trực tiếp. Vì vậy application cần một thư viện client để gửi/nhận message đúng cách RabbitMQ hiểu, thay vì tự viết lại giao thức đó từ đầu:
 
 ```powershell
 dotnet add FoodDelivery.Infrastructure package RabbitMQ.Client --version 7.2.2
 ```
 
-`RabbitMQ.Client` nằm ở Infrastructure vì đây là chi tiết I/O. Domain không biết exchange, queue hoặc AMQP. Application chỉ sở hữu contract mà use case cần gọi.
+`RabbitMQ.Client` nằm ở Infrastructure vì đây là chi tiết I/O — cách byte được gửi qua mạng tới RabbitMQ.
+
+#### Thiết kế "phong thư" chuẩn cho mọi event
+
+Trước khi gửi một message ra ngoài, cần một chuẩn chung cho mọi loại event — giống như quy định thông tin bắt buộc phải ghi ngoài vỏ phong thư, bất kể bên trong là thư gì:
 
 ```csharp
 public interface IIntegrationEvent
 {
-    Guid MessageId { get; }
-    string EventName { get; }
-    int ContractVersion { get; }
-    DateTimeOffset OccurredAtUtc { get; }
-    string? CorrelationId { get; }
-    Guid? TenantId { get; }
+    Guid MessageId { get; } // định danh logic, không đổi qua các lần retry
+    string EventName { get; } // tên sự kiện, ví dụ "order.created"
+    int ContractVersion { get; } // version schema, cho phép rolling deployment
+    DateTimeOffset OccurredAtUtc { get; } // thời điểm sự kiện xảy ra
+    string? CorrelationId { get; } // nối request, outbox, broker và consumer logs
+    Guid? TenantId { get; } // scope theo tenant trong hệ thống multi-tenant
 }
+```
 
+#### Nơi phong thư được gửi đi
+
+Use case (ví dụ: vừa tạo xong đơn hàng) không tự tay mang phong thư đi giao — nó chỉ ném phong thư vào một lối đi trung gian gọi là `IIntegrationEventPublisher`:
+
+```csharp
 public interface IIntegrationEventPublisher
 {
     Task PublishAsync<TEvent>(
         TEvent integrationEvent,
-        string routingKey,
+        string routingKey, // nhãn để exchange định tuyến message
         CancellationToken cancellationToken = default)
         where TEvent : IIntegrationEvent;
 }
 ```
 
-Interface giữ use case phụ thuộc vào hành vi “publish Integration Event”. Connection lifecycle, serialization và broker client vẫn thuộc Infrastructure.
+#### Tại sao phải sinh ra Interface này
 
-Boundary này có lý do cụ thể trong kiến trúc hiện tại: Application cần gọi publisher mà không reference Infrastructure. Nếu không tồn tại ranh giới project đó, một interface chỉ có một implementation có thể là dư thừa.
+Nếu hệ thống chỉ dùng đúng một mình RabbitMQ, tại sao không gọi thẳng class RabbitMqPublisher cho nhanh mà phải tạo interface làm gì cho rườm rà?
+
+Câu trả lời nằm ở **Ràng buộc bảo mật của kiến trúc**:
+
+- **Quy tắc**: Tầng nghiệp vụ (Application) tuyệt đối không được biết và không được kết nối trực tiếp (Reference) tới tầng công nghệ (Infrastructure)
+- **Lý do**: Tầng Application chỉ cần biết "Tôi muốn phát một sự kiện", nó không cần và không nên quan tâm bên dưới đang dùng RabbitMQ, Kafka, AWS SQS, hay đang mã hóa dữ liệu thành Byte như thế nào
+- **Giải pháp**: Interface này chính là một "giao kèo". Application sẽ giữ giao kèo này để gọi hàm. Còn class thực tế cài đặt giao kèo đó (RabbitMqPublisher) sẽ nằm ẩn mình phía sau tầng Infrastructure.
+
+`IIntegrationEventPublisher` chính là một "giao kèo"— Application giữ giao kèo này để gọi hàm, còn class thật sự thực hiện giao kèo đó. `RabbitMqPublisher` — nằm ẩn phía sau Infrastructure, được nối vào lúc chạy qua dependency injection. 
+
+Nhờ vậy, nếu sau này đổi từ RabbitMQ sang Kafka, chỉ cần viết lại Infrastructure, toàn bộ code nghiệp vụ ở Application không phải sửa dòng nào.
 
 ### 5.2 Configuration
 
 ```json
 "RabbitMq": {
-  "HostName": "localhost",
-  "Port": 5673,
-  "UserName": "food_app",
-  "Password": "food_dev",
-  "VirtualHost": "food",
-  "ConnectionName": "food-delivery-api",
-  "ExchangeName": "food.events",
-  "NetworkRecoverySeconds": 5,
-  "RequestedHeartbeatSeconds": 30
+  "HostName": "localhost", // host của RabbitMQ node
+  "Port": 5673, // port AMQP client kết nối tới, khác port 15673 của Management UI
+  "UserName": "food_app", // user đăng nhập
+  "Password": "food_dev", // password, chỉ để plain text ở local
+  "VirtualHost": "food", // vhost cô lập cấu hình, xem mục 3.1
+  "ConnectionName": "food-delivery-api", // tên hiển thị trên Management UI, giúp nhận diện connection
+  "ExchangeName": "food.events", // exchange mà publisher sẽ declare và publish vào
+  "NetworkRecoverySeconds": 5, // thời gian chờ trước khi client tự thử reconnect sau khi mất kết nối
+  "RequestedHeartbeatSeconds": 30 // chu kỳ heartbeat để phát hiện sớm một connection đã chết
 }
 ```
 
-Credential trong ví dụ chỉ dành cho local Docker. Production lấy secret từ secret manager hoặc environment, bật TLS và cấp quyền tối thiểu theo vhost.
-
-Options phải fail fast khi thiếu host, credential, vhost hoặc exchange. Một configuration sai không nên đợi tới request đầu tiên mới biến thành lỗi khó đọc.
+> **Lưu ý:**
+> - Credential trong ví dụ chỉ dành cho local Docker. Production lấy secret từ secret manager hoặc environment, bật TLS và cấp quyền tối thiểu theo vhost.
+> - Nên validate các giá trị bắt buộc (host, credential, vhost, exchange) ngay lúc ứng dụng khởi động — gọi là fail fast. Ví dụ thiếu `UserName`:
+>   - Không validate sớm => Lỗi chỉ lộ ra khi có request thật gọi, và rất khó đoán là do thiếu config.
+>   - Validate lúc khởi động => App báo ngay "RabbitMq:UserName is required" rồi dừng lại.
 
 ### 5.3 Connection lifecycle
+
+Mở một connection TCP mới cho mỗi lần gửi nghĩa là phải bắt tay lại từ đầu — thiết lập kết nối mạng rồi xác thực với RabbitMQ — việc này tạo ra hàng loạt connection ngắn hạn (socket churn), làm tốc độ gửi tin chậm đi.
+
+`RabbitMqConnectionManager` giải quyết bằng cách giữ đúng một connection dài hạn, tái sử dụng cho mọi lần gửi:
 
 ```csharp
 public sealed class RabbitMqConnectionManager : IAsyncDisposable
 {
-    private readonly ConnectionFactory _factory;
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly ConnectionFactory _factory; // bộ cấu hình thông tin kết nối
+    private readonly SemaphoreSlim _gate = new(1, 1); // "chốt cửa" chỉ cho một người qua một lúc
     private IConnection? _connection;
 
     public RabbitMqConnectionManager(RabbitMqOptions options)
@@ -298,8 +435,8 @@ public sealed class RabbitMqConnectionManager : IAsyncDisposable
             UserName = options.UserName,
             Password = options.Password,
             VirtualHost = options.VirtualHost,
-            AutomaticRecoveryEnabled = true,
-            TopologyRecoveryEnabled = true,
+            AutomaticRecoveryEnabled = true, // tự nối lại khi rớt mạng
+            TopologyRecoveryEnabled = true, // tự dựng lại exchange/queue sau khi có mạng lại
             NetworkRecoveryInterval = TimeSpan.FromSeconds(options.NetworkRecoverySeconds),
             RequestedHeartbeat = TimeSpan.FromSeconds(options.RequestedHeartbeatSeconds)
         };
@@ -308,13 +445,18 @@ public sealed class RabbitMqConnectionManager : IAsyncDisposable
     public async Task<IConnection> GetConnectionAsync(
         CancellationToken cancellationToken = default)
     {
+        // 1. Kết nối đang mở sẵn thì dùng luôn, không cần qua chốt
         if (_connection?.IsOpen == true) return _connection;
 
+        // 2. Chưa có kết nối sống, phải xếp hàng qua chốt
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            // 3. Kiểm tra lại sau khi qua chốt, tránh tạo trùng
             if (_connection?.IsOpen == true) return _connection;
             if (_connection is not null) await _connection.DisposeAsync();
+
+            // 4. Chỉ người đầu tiên qua chốt mới thật sự tạo kết nối mới
             _connection = await _factory.CreateConnectionAsync(
                 "food-delivery-api",
                 cancellationToken);
@@ -322,37 +464,46 @@ public sealed class RabbitMqConnectionManager : IAsyncDisposable
         }
         finally
         {
-            _gate.Release();
+            _gate.Release(); // mở chốt cho người tiếp theo
         }
     }
 }
 ```
 
-`IsOpen` được kiểm tra trước và sau gate.
-
-- Lần kiểm tra đầu giữ fast path không lock.
-- Lần kiểm tra sau ngăn hai caller cùng tạo connection khi application vừa khởi động.
-
-Automatic recovery giúp client nối lại sau network interruption. Nó không biến một publish có kết quả chưa xác định thành exactly-once.
+- **Chốt cửa `SemaphoreSlim`:**
+  - Lúc application vừa khởi động, `_connection` đang null.
+  - Nếu 100 request cùng gọi `GetConnectionAsync` một lúc mà không có chốt, cả 100 request sẽ cùng tạo 100 connection riêng — phá sản hoàn toàn ý tưởng **Tái sử dụng**.
+  - `lock` thường của C# không dùng được vì bên trong có `await`, nên phải dùng `SemaphoreSlim` làm khóa bất đồng bộ thay thế.
+- **Kỹ thuật kiểm tra (Double-checked locking):**
+  - Lần 1 (trước chốt) là làn ưu tiên: hệ thống đã ổn định thì chỉ cần thấy connection còn sống là dùng ngay, không phải xếp hàng qua chốt.
+  - Lần 2 (sau chốt) chỉ cần thiết lúc khởi động: ngăn trường hợp hai request cùng thấy `_connection` là null ở lần 1, rồi request tới sau lại tạo thêm một connection thừa sau khi request tới trước đã tạo xong.
+- **Tự động phục hồi (Automatic Recovery):**
+  - Giúp client tự nối lại khi mạng chập chờn.
+  - Không giải quyết được trường hợp mạng đứt đúng lúc đang gửi — message đó có thể đã tới broker hoặc chưa, ứng dụng không có cách nào biết chắc.
 
 ### 5.4 Message Publisher
 
-Publisher tạo một channel, bật Publisher Confirm, declare durable direct exchange rồi publish persistent message:
+Sau khi đã có đường cao tốc (Connection) và các làn đường (Channel), đây là lúc thực hiện hành động quan trọng nhất: **Phát tin nhắn (Publish Message)**.
+
+Để gửi một tin nhắn đi một cách an toàn và không bị thất lạc, phải trải qua 3 bước tuần tự, mỗi bước đều có một nhiệm vụ bảo vệ riêng biệt:
 
 ```csharp
+// Bước 1: mở channel, bật xác nhận từ broker
 _channel = await connection.CreateChannelAsync(
     new CreateChannelOptions(
-        publisherConfirmationsEnabled: true,
-        publisherConfirmationTrackingEnabled: true),
+        publisherConfirmationsEnabled: true, // broker phải báo lại đã nhận message (mục 12)
+        publisherConfirmationTrackingEnabled: true), // client tự theo dõi confirm nào ứng với publish nào
     cancellationToken);
 
+// Bước 2: đảm bảo exchange đã tồn tại trước khi publish
 await _channel.ExchangeDeclareAsync(
     "food.events",
-    ExchangeType.Direct,
-    durable: true,
-    autoDelete: false,
+    ExchangeType.Direct, // khớp chính xác routing key
+    durable: true, // exchange sống sót qua restart của RabbitMQ
+    autoDelete: false, // không tự xóa dù không còn queue nào bind
     cancellationToken: cancellationToken);
 
+// Bước 3: publish, yêu cầu broker báo lại nếu không route được
 await _channel.BasicPublishAsync(
     exchange: "food.events",
     routingKey,
@@ -362,33 +513,42 @@ await _channel.BasicPublishAsync(
     cancellationToken);
 ```
 
-Foundation serialize các publish call qua `SemaphoreSlim(1, 1)` vì channel được sở hữu chung. Cách này giữ ownership và lifecycle đơn giản.
+- **Bước 1 — Bật Publisher Confirm**
+  - Gửi thư thông thường — thả thư xong coi như xong, không biết thư có đến nơi không. Bật `publisherConfirmationsEnabled` giống gửi thư bảo đảm — RabbitMQ nhận được phải gửi lại một tín hiệu xác nhận riêng.
+- **Bước 2 — Khai báo Exchange**
+  - RabbitMQ không tự động sinh ra máy phân loại thư (Exchange) — ném thư vào một exchange chưa tồn tại, cod sẽ báo lỗi ngay. Do đó, hệ thống sử dụng lệnh `ExchangeDeclareAsync` lúc khởi động để tự động tạo Exchange — nếu chưa có thì tạo mới, nếu có rồi sẽ tự bỏ qua mà không gây lỗi, giúp hệ thống luôn sẵn sàng gửi tin nhắn một cách an toàn.
+- **Bước 3 — Cờ `mandatory: true`**
+  - Đây là chốt chặn cuối — nếu dán sai nhãn (routing key) khiến exchange không biết ném thư vào hòm thư (queue) nào, mặc định RabbitMQ sẽ âm thầm hủy thư đó. Cờ `mandatory: true` ép RabbitMQ trả ngược thư lỗi về cho ứng dụng để biết đường xử lý (mục 6).
 
-Reference load đo khoảng 449 confirmed publish/giây với baseline publisher. Channel pool chỉ cần thiết khi target thực tế cao hơn và profiler xác nhận publisher là bottleneck.
+Channel không an toàn khi dùng chung giữa nhiều thread cùng lúc, nên `SemaphoreSlim(1, 1)` được dùng để xếp hàng các lệnh publish qua cùng một channel — đổi lấy sự đơn giản trong ownership và lifecycle. Reference load đo khoảng 449 confirmed publish/giây với cách làm này — chỉ cần nâng cấp lên channel pool khi tải thực tế cao hơn nhiều và profiler xác nhận publisher là bottleneck.
 
-Message properties hiện có:
+Mỗi message publish đi kèm một số property, đóng vai trò như thông tin ghi ngoài vỏ phong thư:
 
-```text
-MessageId       = event.MessageId
-Type            = event.EventName
-ContentType     = application/json
-DeliveryMode    = persistent
-CorrelationId   = event.CorrelationId
-x-event-version = event.ContractVersion
-x-tenant-id     = event.TenantId
-```
-
-`MessageId` là logical identity, không tạo mới mỗi lần retry. `CorrelationId` nối HTTP request, Outbox, broker và consumer logs. `ContractVersion` cho phép producer và consumer rolling deployment mà không đoán schema từ payload.
+| Property | Giá trị | Vai trò |
+|---|---|---|
+| `MessageId` | `event.MessageId` | Định danh logic, không đổi kể cả khi phải gửi lại (retry) |
+| `Type` | `event.EventName` | Tên sự kiện, ví dụ `order.created` |
+| `ContentType` | `application/json` | Định dạng của phần thân message |
+| `DeliveryMode` | `persistent` | Yêu cầu broker ghi message xuống đĩa, sống sót qua việc RabbitMQ restart |
+| `CorrelationId` | `event.CorrelationId` | Mã vết nối HTTP request, Outbox, broker và consumer logs |
+| `x-event-version` | `event.ContractVersion` | Version schema, cho phép producer/consumer rolling deployment mà không đoán cấu trúc dữ liệu |
+| `x-tenant-id` | `event.TenantId` | Scope theo tenant trong hệ thống multi-tenant |
 
 ### 5.5 Dependency Injection và readiness
 
+Sau khi đã hoàn thiện quản lý kết nối **Connection Manager** và bộ gửi tin **Publisher**, bước tiếp theo là đăng ký chúng vào **DI container** của .NET để ứng dụng có thể đem ra sử dụng, đồng thời thiết lập cơ chế **Health Check** để giám sát RabbitMQ khi chạy thật:
+
 ```csharp
+// đăng ký các thành phần sở hữu resource dài hạn
 services.AddSingleton(rabbitMqOptions);
 services.AddSingleton<RabbitMqConnectionManager>();
 services.AddSingleton<RabbitMqPublisher>();
+
+// map interface publish event sang implementation, để use case chỉ biết interface
 services.AddSingleton<IIntegrationEventPublisher>(provider =>
     provider.GetRequiredService<RabbitMqPublisher>());
 
+// health check để readiness probe biết RabbitMQ còn sống hay không
 services.AddHealthChecks()
     .AddCheck<RabbitMqHealthCheck>("rabbitmq", tags: new[] { "ready" });
 ```
@@ -400,21 +560,29 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 });
 ```
 
-Connection manager và publisher là Singleton vì chúng sở hữu resource dài hạn theo process. Đăng ký publisher Scoped sẽ tạo nhiều connection/channel owner theo request và làm dispose/recovery khó kiểm soát.
+#### Tại sao toàn bộ các lớp RabbitMQ phải đăng ký dạng Singleton?
 
-Readiness cho biết instance có giao tiếp được với dependency bắt buộc hay không.
+`RabbitMqConnectionManager` và `RabbitMqPublisher` phải là Singleton — sống suốt vòng đời ứng dụng — vì chúng giữ tài nguyên dài hạn: connection và channel dùng chung cho mọi lần publish.
 
-Liveness không nên kill process chỉ vì RabbitMQ lỗi tạm thời. Nếu cả liveness và readiness cùng phụ thuộc broker, orchestrator có thể tạo restart storm đúng lúc broker gặp sự cố.
+Đăng ký Scoped (tạo mới theo mỗi request) sẽ khiến ứng dụng liên tục mở và đóng connection sau mỗi request, vừa tốn tài nguyên vừa làm automatic recovery gần như vô nghĩa — vì chẳng còn connection nào đủ lâu để nó phục hồi.
+
+#### Phân biệt Liveness và Readiness: tránh cái bẫy "bão khởi động lại"
+
+**Độ sẵn sàng (Readiness Probe)** — probe báo instance đã sẵn sàng nhận traffic — nên phụ thuộc vào RabbitMQ: broker lỗi thì instance không publish được, nên cần báo "chưa sẵn sàng" để orchestrator tạm ngắt traffic vào nó.
+
+**Độ sống sót (Liveness Probe)** — probe báo process còn sống, quyết định có nên restart hay không — thì không nên phụ thuộc vào RabbitMQ. Nếu liveness cũng check broker, một lần RabbitMQ lỗi tạm thời sẽ khiến orchestrator tưởng mọi instance đã chết và đồng loạt restart — tạo ra một "bão khởi động lại" (restart storm) dồn thêm tải đúng lúc hạ tầng đang gặp sự cố.
 
 ## 6. Message Publishing và Dashboard
 
-Để thấy message ở trạng thái `Ready`, cần có queue và binding trước khi publish. Exchange không phải nơi lưu message. Trong Management UI:
+Exchange chỉ định tuyến, không lưu trữ — publish vào exchange không tự động tạo ra chỗ chứa message. Nếu chưa có queue nào bind vào exchange, message publish ra sẽ không có nơi để đi vào và biến mất, không thể thấy trên Dashboard.
 
-1. mở `Queues and Streams`, tạo durable queue `notification.order-created`;
-2. mở exchange `food.events`;
-3. thêm binding từ exchange tới queue với routing key `order.created`;
-4. gọi publisher với routing key `order.created`;
-5. quay lại queue và quan sát `Ready = 1` nếu chưa có consumer.
+Vì vậy trước khi publish, cần tạo sẵn một queue và bind nó vào exchange. Trong Management UI:
+
+1. Mở `Queues and Streams`, tạo durable queue `notification.order-created`.
+2. Mở exchange `food.events`.
+3. Thêm binding từ exchange tới queue với routing key `order.created`.
+4. Gọi publisher với routing key `order.created`.
+5. Quay lại queue và quan sát `Ready = 1` nếu chưa có consumer.
 
 ```mermaid
 sequenceDiagram
@@ -428,14 +596,20 @@ sequenceDiagram
 
 Nếu routing key không có binding, `mandatory = true` làm broker return message với `NO_ROUTE`.
 
-Nếu bỏ `mandatory`, broker vẫn có thể chấp nhận publish rồi loại message vì không có đích. Publisher Confirm và mandatory routing giải quyết hai câu hỏi khác nhau:
+Nếu bỏ `mandatory`, broker vẫn chấp nhận publish bình thường rồi âm thầm loại message vì không tìm được đích — và Publisher Confirm không phát hiện được điều đó, vì hai cơ chế này trả lời hai câu hỏi khác nhau:
 
-- Confirm: broker đã nhận trách nhiệm cho publish chưa?
-- Mandatory return: message có được route vào ít nhất một queue không?
+- **Confirm** — broker đã nhận trách nhiệm cho publish chưa?
+- **Mandatory** — message có thực sự được route vào ít nhất một queue không?
+
+Một publish hoàn toàn có thể được Confirm nhưng vẫn bị mất, nếu không bật `mandatory`.
 
 ## 7. Work Queue và competing consumers
 
-Khi hai instance cùng consume `notification.order-created`, RabbitMQ phân phối các message trong queue giữa chúng. Đây là scale-out của một logical consumer.
+Ở mục 6, mỗi message trong `notification.order-created` chỉ có đúng một consumer đọc. Nhưng nếu traffic tăng và một consumer instance xử lý không kịp, câu hỏi tự nhiên là — có thể chạy nhiều instance cùng đọc chung queue đó để chia việc không?
+
+RabbitMQ gọi mô hình này là Work Queue — nhiều consumer instance cùng subscribe một queue trở thành **Competing Consumers**. — chúng "cạnh tranh" nhau để nhận message, và mỗi message chỉ rơi vào tay đúng một instance, không phát cho tất cả. Nhiều instance vật lý này thực chất đóng vai trò như một logical consumer duy nhất — tất cả cùng làm một việc (gửi email) và chia nhau xử lý cùng một hàng đợi.
+
+Ba instance A, B, C cùng subscribe `notification.order-created` sẽ chia nhau các message trong queue đó:
 
 ```mermaid
 flowchart LR
@@ -444,13 +618,35 @@ flowchart LR
     Q --> C3[Worker instance C]
 ```
 
-Ba instance không nhận ba bản sao. Muốn reporting cũng nhận `order.created`, reporting phải có queue riêng bind cùng exchange. Queue là subscription durability boundary; consumer instance chỉ là capacity của subscription đó.
+Ba instance A, B, C không nhận ba bản sao của cùng một message — chúng chia nhau xử lý, mỗi message chỉ đi vào đúng một instance. Điều này chỉ đúng vì cả ba đều là bản sao của cùng một logical consumer (cả ba cùng làm một việc là gửi email).
+
+Cơ chế chia nhau đó cũng là lý do reporting không thể chỉ đọc chung queue `notification.order-created` — nó cần một queue riêng của chính mình, bind cùng exchange (như đã nói ở mục 3), để nhận một bản sao riêng của message.
+
+Ví dụ dễ hình dung — coi queue như một băng chuyền hành lý ở sân bay.
+
+- Hễ một người nhặt một món đồ, món đó biến mất khỏi băng chuyền — người khác không còn thấy nó nữa.
+- Nếu nhân viên Email và nhân viên Báo cáo cùng đứng quanh một băng chuyền, đơn nào bị nhặt trước chỉ tới được đúng một phòng, phòng còn lại mất trắng đơn đó.
+- Lâu dài, mỗi phòng chỉ nhận được khoảng một nửa dữ liệu.
+- Mỗi phòng cần một băng chuyền riêng: mỗi đơn hàng đi qua exchange được sao thành nhiều bản, mỗi bản vào đúng một queue, để cả hai phòng đều nhận đủ 100% dữ liệu.
+
+Nói cách khác, queue mới là thứ đại diện cho một subscription bền vững, tồn tại độc lập với việc có bao nhiêu consumer instance đang đọc nó. Consumer instance chỉ là năng lực xử lý (capacity) gắn vào subscription đó — thêm hay bớt instance không làm thay đổi bản thân subscription.
 
 ## 8. Message Acknowledgement
 
-Automatic ACK xóa trách nhiệm của broker ngay khi delivery được gửi. Nếu process dừng trong lúc gửi email hoặc commit MySQL, message đã mất. Manual ACK cho phép application quyết định lúc nào effect đủ bền vững.
+Khi RabbitMQ đẩy một message cho consumer xử lý, câu hỏi sống còn đặt ra là — lúc nào broker được phép xóa message đó khỏi hàng đợi?
 
-Thiết kế trực giác khác là ACK trước rồi mới commit để tránh duplicate:
+Nếu broker vừa gửi message đi đã lập tức xóa ngay, trong khi consumer lại bất ngờ crash trước khi kịp thực hiện, message đó sẽ biến mất vĩnh viễn. Không ai gửi lại, không ai biết công việc đã thất bại.
+
+Để giải quyết lỗ hổng này, RabbitMQ sử dụng cơ chế **ACK** (acknowledgement) — một tín hiệu phản hồi do consumer chủ động gửi ngược lại để báo: "Tôi đã xử lý xong việc rồi, broker xóa message này đi ".
+
+RabbitMQ cung cấp hai chế độ xác nhận:
+
+- **Automatic ACK** — broker coi message đã xong ngay khi gửi đi, không cần đợi phản hồi từ consumer. Đây chính là kiểu "xóa ngay khi vừa gửi message" nguy hiểm ở trên.
+- **Manual ACK** — consumer tự gọi ACK khi nó thực sự xử lý xong, cho phép application tự quyết định lúc nào effect đã đủ bền vững mới báo cho broker.
+
+Nhưng chọn Manual ACK vẫn chưa đủ — còn phải quyết định gửi ACK trước hay sau khi commit xuống database.
+
+Thiết kế sai lầm (ACK trước rồi mới commit) — để tránh nhận trùng message (duplicate):
 
 ```mermaid
 sequenceDiagram
@@ -464,7 +660,7 @@ sequenceDiagram
     Note over R: Broker không còn M1 để redeliver
 ```
 
-ACK trước commit đổi duplicate thành data loss. Thiết kế an toàn chọn commit trước ACK:
+Thiết kế an toàn (Commit trước, ACK sau) — chỉ khi nào dữ liệu đã ghi xuống Database, consumer mới gửi tín hiệu ACK về cho RabbitMQ.
 
 ```mermaid
 sequenceDiagram
@@ -479,37 +675,71 @@ sequenceDiagram
     C->>R: ACK
 ```
 
-Thứ tự này có thể tạo duplicate nhưng không làm mất effect. Consumer vì thế phải nhận diện được một logical message đã xử lý trước đó.
+Thà chấp nhận hệ thống xử lý trùng tin nhắn (Duplicate) còn hơn là làm mất dữ liệu (Data loss). Chính vì vậy, Consumer bắt buộc phải được thiết kế để có khả năng **nhận diện và bỏ qua các tin nhắn đã từng xử lý trước đó (Idempotent Consumer)**.
 
 ## 9. Idempotency và Inbox
 
-Một operation idempotent cho cùng kết quả quan sát được dù nhận cùng logical request nhiều lần. Với database consumer, Inbox lưu `MessageId` đã xử lý. Inbox insert và business mutation phải commit trong cùng transaction.
+Mục 8 đã đưa ra một kết luận xương máu: Để đảm bảo an toàn dữ liệu, bắt buộc phải chọn cơ chế **Commit trước, ACK sau**. Sự đánh đổi của lựa chọn này là hệ thống phải chấp nhận rủi ro nhận trùng tin nhắn **(Duplicate)**.
+
+Để sống sót qua những lần tin nhắn bị gửi lặp lại đó, Consumer bắt buộc phải có tính chất **Idempotent** (Tính đồng nhất) — nghĩa là dù có nhận và xử lý cùng một tin nhắn bao nhiêu lần đi nữa, kết quả cuối cùng lưu trong hệ thống vẫn duy nhất và không bị sai lệch.
+
+**Hiện thực hóa tính đồng nhất bằng giải pháp Inbox Pattern**
+
+Đối với các Consumer làm nhiệm vụ ghi dữ liệu vào Database, cách làm phổ biến và triệt để nhất là sử dụng một bảng ghi nhớ **Inbox** — lưu lại `MessageId` đã xử lý. 
+
+Việc kiểm tra/ghi nhận tin nhắn và việc cập nhật dữ liệu nghiệp vụ phải được đảm bảo trong cùng một **Transaction (Tính nguyên tử - Atomicity)**.
 
 ```text
 BEGIN
+  -- 1. Lưu ID của tin nhắn vào bảng Inbox để "đánh dấu chủ quyền"
   INSERT Inbox(consumerName, tenantId, shopId, messageId)
+
+   -- 2. Thực hiện cập nhật dữ liệu nghiệp vụ (ví dụ: tạo đơn hàng)
   UPDATE business state
 COMMIT
+
+-- 3. Chỉ khi Transaction trên thành công hoàn toàn, mới bấm nút gửi ACK
 ACK
 ```
 
-Nếu Inbox và mutation nằm ở hai transaction, crash giữa chúng làm Inbox nói “đã xử lý” trong khi effect chưa tồn tại, hoặc effect tồn tại nhưng Inbox chưa ghi. Atomic boundary quan trọng hơn tên pattern.
+Nếu Inbox và mutation nằm ở hai transaction riêng, crash giữa chúng làm Inbox nói "đã xử lý" trong khi effect chưa tồn tại, hoặc effect tồn tại nhưng Inbox chưa ghi. **Ranh giới nguyên tử (Atomic Boundary) mới là thứ quyết định sự sống còn.**
 
-Trong multi-tenant system, unique key không thể chỉ là `MessageId`. Scope tham chiếu an toàn cho effect theo shop là:
+**Thiết kế Khóa duy nhất (Unique Key)**
+
+Trong môi trường thực tế, đặc biệt là hệ thống chạy nhiều dịch vụ song song và chia theo tenant, **tuyệt đối không được dùng một mình MessageId làm Khóa chính (Unique Key) cho bảng Inbox.** Khóa tham chiếu an toàn bắt buộc phải là một cụm gồm 4 yếu tố:
 
 ```text
 (consumerName, tenantId, shopId, messageId)
 ```
 
-Header tenant hỗ trợ truyền context và tracing, không thay authorization. Consumer vẫn phải kiểm tra tenant/shop scope trong EF query, Dapper predicate, cache key và database constraint.
+Lý do:
 
-Side effect ngoài MySQL cần idempotency tại provider boundary. Inbox không thể rollback email hoặc payment request đã rời process.
+- **Nhiều consumer cùng nhận một message** — sự kiện `order.created` được nhân bản gửi cho cả consumer gửi email và consumer đồng bộ báo cáo. Nếu Inbox chỉ khóa bằng `MessageId`, consumer nào xử lý xong trước sẽ ghi vào Inbox — consumer còn lại đến sau thấy `MessageId` đã tồn tại sẽ tưởng nhầm mình đã xử lý và bỏ qua, gây mất dữ liệu.
+- **Cô lập theo tenant/shop** — mỗi tenant và mỗi shop cần được phân vùng độc lập trong Inbox, để đảm bảo an toàn dữ liệu và dễ tra cứu log, giống cách mọi dữ liệu nghiệp vụ khác đã được thiết kế.
 
-Nếu provider hỗ trợ idempotency key, consumer dùng logical `MessageId` hoặc business operation key. Nếu không, hệ thống cần state machine và reconciliation.
+> **Lưu ý:** Tenant trong message header chỉ hỗ trợ truyền context và tracing — nó không thay cho authorization. Consumer vẫn phải tự kiểm tra tenant/shop scope trong EF query, Dapper predicate, cache key và database constraint.
+
+**Giới hạn của Inbox Pattern: Bài toán Bên thứ ba (Side Effect)**
+
+Inbox chỉ bảo vệ được state trong MySQL. Gửi email hay gọi payment là side effect nằm ngoài database — một khi request đó đã rời process, Inbox không có cách nào rollback nó, nên idempotency ở nhóm side effect này phải được xử lý tại chính provider.
+
+Nếu provider hỗ trợ idempotency key, consumer dùng logical `MessageId` hoặc business operation key làm key đó. Nếu provider không hỗ trợ, hệ thống cần tự xây một state machine và cơ chế reconciliation để phát hiện và dọn dẹp side effect bị lặp.
 
 ## 10. Prefetch và backpressure
 
-`prefetch` giới hạn số delivery chưa ACK trên mỗi consumer channel. Giá trị quá thấp để worker nhàn trong lúc chờ network; quá cao giữ nhiều message trong memory và tạo burst lên MySQL.
+**Idempotency** giải quyết việc consumer nhận trùng message, nhưng không giới hạn broker có thể đẩy bao nhiêu message cùng lúc cho một consumer trước khi nó kịp ACK. Không giới hạn, broker sẵn sàng dồn hàng nghìn message chưa ACK vào một consumer đang xử lý chậm — chất đầy memory phía consumer và dồn tải xuống MySQL cùng lúc khi tất cả bắt đầu xử lý.
+
+`prefetch` chính là cơ chế **Backpressure (Kiểm soát dòng chảy)** cho vấn đề đó: nó giới hạn số delivery chưa ACK mà broker được phép gửi cho mỗi consumer channel tại một thời điểm. 
+
+**Bài toán cân não khi cấu hình Prefetch**
+
+- **Nếu đặt quá thấp (ví dụ bằng 1):** Worker cứ làm xong một việc lại phải ngồichờ tín hiệu mạng truyền tin nhắn tiếp theo từ Broker sang. Hệ thống bị lãng phí thời gian chết do độ trễ mạng (Network Round-trip).
+
+- Nếu đặt quá cao: Quá nhiều tin nhắn bị chất đống trong bộ nhớ của Consumer, vô tình tạo ra một trận "lũ quét" áp lực (Burst) nén thẳng xuống Database MySQL ngay khi cả loạt tác vụ cùng lúc khởi động.
+
+**Công thức tính toán lượng tin nhắn tồn đọng tối đa**
+
+Vì prefetch áp dụng trên từng consumer channel, tổng số message chưa ACK toàn hệ thống có thể tính được từ số consumer đang chạy:
 
 ```text
 globalConsumers = instanceCount × consumersPerInstance
@@ -523,21 +753,35 @@ globalConsumers = 4 × 8 = 32
 maximumUnacked  = 32 × 32 = 1.024
 ```
 
-Reference load ghi nhận `Unacked = 1.024`. Kết quả này cho thấy parameter đã tạo đúng concurrency envelope dự tính; nó không chứng minh 32 là cấu hình tối ưu.
+Reference load ghi nhận `Unacked = 1.024`, đúng như công thức tính trước — nghĩa là prefetch đang hoạt động đúng như thiết kế, chứ không chứng minh 32 là cấu hình tối ưu.
 
-Ceiling tiếp theo nằm ở MySQL connection pool và downstream safe concurrency. Tăng worker khi database đã bão hòa chỉ làm transaction latency và lock contention tăng.
+**Điểm nghẽn tiếp theo: Giới hạn của Database**
 
-## 11. Retry và Dead Letter Queue
+Việc cố tình tăng số lượng Worker hay nâng cao chỉ số Prefetch chỉ làm kéo dài thời gian xử lý một transaction (latency) và tăng tỷ lệ tranh chấp khóa dữ liệu (lock contention), khiến hệ thống càng dễ lâm vào cảnh bế tắc.
 
-Retry phù hợp với lỗi có khả năng tự hết:
+## 11. Retry và Dead Letter Queue (DLQ)
 
-- network timeout;
-- downstream `503`;
-- deadlock hoặc lock wait timeout.
+Các mục từ 8 đến 10 giả định rằng Consumer luôn xử lý thành công, hệ thống chỉ đối mặt với nguy cơ trùng lặp hoặc nghẽn mạch. Tuy nhiên trong thực tế, Consumer hoàn toàn có thể bị lỗi thật sự. Lúc này, hệ thống phải đứng trước một quyết định cân não: **Thử lại (Retry) hay vứt bỏ luôn?**
 
-Contract version không hỗ trợ, validation failure và business resource không tồn tại là permanent failure. Retry chúng vô hạn chỉ làm queue nghẽn.
+Chiến lược xử lý lỗi bắt buộc phải phân loại chính xác bản chất của lỗi:
 
-NACK rồi requeue ngay vào cùng queue có thể tạo hot loop: consumer nhận lại cùng poison message liên tục và không còn capacity cho message tốt. Một retry topology thêm delay:
+**Lỗi tạm thời (Transient Failure):** Thường tự biến mất sau một khoảng thời gian ngắn — nhóm này rất phù hợp để Retry.
+
+- Network timeout.
+- Downstream `503`.
+- Deadlock hoặc lock wait timeout.
+
+**Lỗi vĩnh viễn (Permanent Failure):** Thử lại bao nhiêu lần cũng vô ích — việc cố chấp Retry nhóm này vô hạn sẽ biến tin nhắn thành một "viên thuốc độc" (Poison Message) làm nghẽn chết toàn bộ hàng đợi.
+
+- Contract version không được hỗ trợ.
+- Validation failure.
+- Business resource không tồn tại.
+
+**Mô hình Retry Topology: Tránh cái bẫy Vòng lặp vô hạn (Hot Loop)**
+
+Nếu Consumer xử lý lỗi rồi phát tín hiệu từ chối **(NACK)** và yêu cầu RabbitMQ nhét ngay tin nhắn đó ngược lại hàng đợi cũ **(requeue)**, bạn sẽ vô tình tạo ra một vòng lặp chết chóc **(Hot Loop)** — Máy vừa nhả thư lỗi ra lại lập tức nhặt chính nó vào để xử lý tiếp, tiêu tốn sạch tài nguyên và chặn đường của các tin nhắn tốt khác.
+
+Hướng xử lý —  xây dựng một hạ tầng điều phối lỗi thông minh (Retry Topology) sử dụng thời gian sống của tin nhắn (TTL - Time To Live):
 
 ```mermaid
 flowchart LR
@@ -550,7 +794,64 @@ flowchart LR
     DX --> DQ[Dead Letter Queue]
 ```
 
-Mỗi retry policy cần `maxAttempts`, delay/backoff, execution timeout và terminal state. RabbitMQ thêm `x-death` khi dead-letter.
+Khai báo topology trên gồm hai cặp exchange/queue phụ, cộng thêm main queue đã có từ mục 6:
+
+```csharp
+// Retry: giữ message TTL giây rồi tự động đẩy ngược lại main queue qua x-dead-letter-exchange
+await _channel.ExchangeDeclareAsync("notification.retry", ExchangeType.Direct, durable: true);
+await _channel.QueueDeclareAsync(
+    "notification.order-created.retry",
+    durable: true,
+    exclusive: false,
+    autoDelete: false,
+    arguments: new Dictionary<string, object>
+    {
+        ["x-message-ttl"] = 30_000, // 30s chờ trước khi thử lại
+        ["x-dead-letter-exchange"] = "food.events", // hết TTL, quay lại đúng exchange gốc
+        ["x-dead-letter-routing-key"] = "order.created"
+    });
+await _channel.QueueBindAsync("notification.order-created.retry", "notification.retry", routingKey: "order.created");
+
+// Dead: điểm dừng cuối cho permanent failure hoặc hết maxAttempts
+await _channel.ExchangeDeclareAsync("notification.dead", ExchangeType.Fanout, durable: true);
+await _channel.QueueDeclareAsync("notification.order-created.dlq", durable: true, exclusive: false, autoDelete: false);
+await _channel.QueueBindAsync("notification.order-created.dlq", "notification.dead", routingKey: "");
+```
+
+Phía consumer, retry policy cần ba tham số để quyết định publish message sang exchange nào:
+
+```csharp
+try
+{
+    await handler.HandleAsync(message, cancellationToken);
+    await _channel.BasicAckAsync(deliveryTag, multiple: false);
+}
+catch (TransientFailureException) when (attemptCount < maxAttempts) // maxAttempts: số lần thử tối đa
+{
+    // publish sang retry exchange, đợi Publisher Confirm rồi mới ACK bản gốc (như mục 11 đã nói)
+    await _channel.BasicPublishAsync("notification.retry", "order.created", body: originalBody);
+    await _channel.WaitForConfirmsOrDieAsync(cancellationToken);
+    await _channel.BasicAckAsync(deliveryTag, multiple: false);
+}
+catch (Exception) // permanent failure hoặc đã hết maxAttempts: terminal state là DLQ
+{
+    await _channel.BasicPublishAsync("notification.dead", "", body: originalBody);
+    await _channel.WaitForConfirmsOrDieAsync(cancellationToken);
+    await _channel.BasicAckAsync(deliveryTag, multiple: false);
+}
+```
+
+`delay/backoff` (thời gian giãn cách giữa các lần thử) nằm ở chính `x-message-ttl` của retry queue — TTL càng dài, thời gian chờ trước khi thử lại càng lâu.
+
+Ví dụ dễ hình dung — một retry policy giống cách công ty chuyển phát xử lý một món hàng giao lỗi (nhà không có người nhận, địa chỉ mờ không đọc được) — không thể đứng đợi mãi, nhưng cũng không thể vứt hàng ngay.
+
+- **Số lần thử tối đa (`maxAttempts` - ví dụ: 3 lần)** — giống việc shipper chỉ quay lại giao tối đa vài lần — quá số đó thì dừng.
+- **Thời gian giãn cách (`delay/backoff` - ví dụ: 2 tiếng)** — giống việc hẹn vài tiếng sau mới quay lại lần kế, thay vì bấm chuông liên tục làm phiền.
+- **Điểm dừng cuối cùng (DLQ - Hòm thư lỗi)** — hàng thất bại đủ số lần được đưa vào đây để xử lý riêng, giải phóng chỗ cho các đơn hàng tốt khác.
+
+Khi một message bị đưa vào DLQ, RabbitMQ tự dán một "nhãn biên bản" tên `x-death`, ghi lại —  message lỗi ở queue nào, lý do bị loại (`expired`, `rejected`...), và đã thử lại bao nhiêu lần trước khi bỏ cuộc. 
+
+Đây là dữ liệu quý để debug — khi khách hàng khiếu nại "sao không nhận được email xác nhận", chỉ cần mở DLQ và đọc `x-death` là biết ngay nguyên nhân, không cần lục hàng triệu dòng log để đoán mò.
 
 Integration test quan sát được ba kết quả:
 
@@ -560,18 +861,27 @@ Integration test quan sát được ba kết quả:
 | Permanent failure | Vào DLQ ở attempt đầu |
 | Poison message | Vào DLQ sau attempt thứ ba |
 
-Khi application tự publish message sang DLQ để bổ sung failure metadata, phải chờ Publisher Confirm của DLQ trước khi ACK delivery gốc. Nếu ACK trước rồi DLQ publish thất bại, error handling lại trở thành nguồn làm mất message.
+Khi ứng dụng chủ động phát tin nhắn lỗi sang Dead Letter Queue (DLQ) để bổ sung metadata, tiến trình bắt buộc phải nhận được tín hiệu Publisher Confirm từ DLQ thành công trước khi thực hiện ACK tin nhắn gốc trên main queue. 
+
+Việc đảo ngược thứ tự bằng cách ACK trước khi nhận confirm từ DLQ sẽ tạo ra rủi ro mất mát dữ liệu chí mạng nếu hành động phát tin nhắn lỗi gặp sự cố rớt mạng hoặc nghẽn mạch (broker timeout), khiến tin nhắn bị xóa bỏ hoàn toàn ở cả hai đầu hàng đợi.
+
+Ví dụ dễ hình dung — giống một nhân viên bưu tá xử lý thư lỗi.
+
+- **Đúng** — cất thư lỗi vào tủ lưu trữ trước, đợi tủ khóa an toàn (Publisher Confirm), rồi mới về bàn ký sổ xóa thư gốc (ACK).
+- **Sai** — ký sổ xóa thư gốc trước, rồi mới đi cất thư lỗi vào tủ — nếu tủ kẹt khóa giữa chừng (mất kết nối, broker bận), thư gốc đã bị xóa mà thư lỗi cũng chưa kịp cất, mất trắng cả hai.
 
 ## 12. Dual-write và Publisher Confirm
 
-Publisher Confirm cho biết broker đã nhận message. Use case tạo đơn vẫn phải thực hiện hai thao tác độc lập: ghi MySQL và publish RabbitMQ.
+Mục 11 giả định publish RabbitMQ luôn thành công, chỉ consumer mới có nguy cơ xử lý lỗi. Nhưng bản thân publish cũng có thể "thất bại" theo một cách khác — không phải vì RabbitMQ từ chối message, mà vì ghi business data và publish message là hai thao tác tách rời, trên hai hệ thống độc lập không chia sẻ transaction.
+
+Publisher Confirm chỉ cho biết broker đã nhận message — nó không giải quyết được vấn đề khi use case tạo đơn phải làm cả hai việc: ghi `DonHang` vào MySQL, rồi publish `DonHangDaTao` sang RabbitMQ. Giả sử ghi MySQL trước, publish sau:
 
 ```text
 COMMIT DonHang
 publish DonHangDaTao
 ```
 
-Process có thể dừng giữa hai dòng. Đổi thứ tự không giúp được:
+Process có thể dừng giữa hai dòng — `DonHang` đã tồn tại trong MySQL nhưng consumer không bao giờ nhận được event tương ứng. Đổi thứ tự không giúp được:
 
 ```text
 publish DonHangDaTao
@@ -580,9 +890,32 @@ ROLLBACK DonHang
 
 Consumer nhận event cho một đơn chưa từng tồn tại. MySQL transaction không thể tự động bao trùm RabbitMQ publish. Đây là dual-write problem.
 
+#### Cái bẫy của việc lồng publish vào trong database transaction
+
+Một cách sửa trực giác là đưa dòng publish vào giữa transaction, trước khi commit:
+
+```csharp
+using var transaction = await dbContext.Database.BeginTransactionAsync();
+
+await dbContext.DonHangs.AddAsync(donHang);
+await dbContext.SaveChangesAsync(); // chỉ mới ghi tạm vào DB, chưa COMMIT
+
+// cố tình publish RabbitMQ khi transaction vẫn đang mở
+await _integrationEventPublisher.PublishAsync(new DonHangDaTaoEvent(...));
+
+await transaction.CommitAsync(); // chính thức chốt dữ liệu xuống DB
+```
+
+Cách này trông có vẻ an toàn nhưng mở ra hai vấn đề:
+
+- **Lỗi logic dữ liệu** — dù `PublishAsync` nằm trước `CommitAsync`, bản thân `CommitAsync` vẫn có thể thất bại (nghẽn mạng với DB, xung đột khóa, DB hết tài nguyên). Kết quả là database bị rollback nhưng message thì đã bay đi mất — consumer vẫn nhận được event của một đơn hàng chưa từng tồn tại.
+- **Nghẽn connection pool** — như đã nói ở mục 5.4, publish lên RabbitMQ cần chờ Publisher Confirm, tức là chờ một round-trip mạng. Giữ database transaction mở trong lúc chờ I/O mạng bên ngoài sẽ giữ chặt connection lâu hơn gấp nhiều lần bình thường. Dưới tải cao, điều này làm cạn kiệt connection pool của MySQL, kéo tê liệt cả ứng dụng.
+
+Cả hai vấn đề đều xuất phát từ cùng một nguyên nhân — publish RabbitMQ vẫn là một lời gọi mạng độc lập, đặt nó vào trong transaction không biến nó thành một phần của transaction đó. **Outbox** sẽ giải quyết đúng vấn đề này mà không cần giữ transaction mở chờ mạng.
+
 ## 13. Transactional Outbox
 
-Outbox ghi business state và intent phát event trong cùng MySQL transaction:
+Mô hình Outbox giải quyết bài toán dual-write bằng cách gộp hành động lưu trạng thái nghiệp vụ (business state) và mục đích phát tán sự kiện (intent) vào chung một database transaction duy nhất:
 
 ```mermaid
 sequenceDiagram
@@ -599,17 +932,27 @@ sequenceDiagram
     O->>DB: Mark sent
 ```
 
-Outbox không tạo exactly-once. Nếu dispatcher dừng sau Confirm nhưng trước `mark sent`, lease hết hạn và message được publish lại.
+**Đánh đổi kiến trúc — Chấp nhận trùng để không mất dữ liệu**
 
-Outbox chọn “không mất intent, có thể duplicate”. Inbox hoàn thiện cặp thiết kế bằng cách biến duplicate thành no-op.
+Outbox không tạo exactly-once (xử lý đúng một lần). Để phân phối công việc cho nhiều luồng chạy ngầm xử lý, bộ điều phối **(Outbox Dispatcher)** sẽ nhặt một nhóm giới hạn các tin nhắn tại một thời điểm (bounded batch) bằng cơ chế cho thuê **(Lease)**. Cơ chế này tự động đánh dấu: Ai đang giữ hàng dữ liệu này **(lockedBy)** và giữ trong bao lâu **(lockedUntilUtc)**.
 
-Nhiều dispatcher dùng bounded batch với các thành phần:
+Nếu một Dispatcher bị đột tử (crash) ngay sau khi RabbitMQ đã báo nhận thư thành công (Publisher Confirm) nhưng chưa kịp quay lại MySQL để đánh dấu đã gửi (mark sent), thời hạn Lease sẽ hết hạn.
 
-- `FOR UPDATE SKIP LOCKED`;
-- `lockedBy`;
-- `lockedUntilUtc`.
+Một Dispatcher khác sẽ nhảy vào thuê lại chính nhóm dữ liệu đó và thực hiện bắn lại sang RabbitMQ lần hai.
 
-`SKIP LOCKED` phù hợp với Outbox vì các row độc lập và không yêu cầu thứ tự tuyệt đối. Lease cho phép instance khác reclaim khi worker dừng.
+> **Lưu ý:** Đây là đánh đổi có chủ đích — Outbox thà gửi trùng event còn hơn làm mất nó. Gửi trùng không gây hại gì, vì Inbox (mục 9) đã kiểm tra `messageId` và tự bỏ qua bản đã xử lý.
+
+Ví dụ dễ hình dung — bảng Outbox giống như một kho hàng, với hai dispatcher (A và B) cùng vào nhặt gói hàng mang đi giao cho RabbitMQ.
+
+- Dispatcher A vào kho nhặt một gói hàng (Đơn hàng số #99). Hệ thống ghi chú vào sổ: "Gói hàng #99 đã giao cho Dispatcher A **(lockedBy)**, thời hạn giữ là đến 10h05 **(lockedUntilUtc)**". Trong khoảng thời gian này, Dispatcher B vào kho sẽ bị cấm không được đụng vào gói #99.
+- Dispatcher A mang gói hàng #99 bắn sang RabbitMQ thành công. RabbitMQ đã nhận hàng an toàn và gửi lại biên nhận **(Publisher Confirm)**.
+- Đúng lúc Dispatcher A đang quay xe đi về kho để gạch tên gói #99 khỏi sổ (mark sent) thì xe anh ta bị hỏng máy giữa đường (Tiến trình Consumer bị crash đột ngột).
+- Đồng hồ điểm 10h06, thời hạn giữ hàng đã hết *(lockedUntilUtc)*. Hệ thống thấy gói #99 vẫn chưa được gạch tên, liền mở khóa nó ra. 
+- Anh Dispatcher B vào kho, thấy gói #99 đang trống liền lập tức nhặt lên và mang đi bắn sang RabbitMQ một lần nữa.
+
+**Kết quả:** RabbitMQ nhận hai bản sao của cùng đơn hàng #99 — nhưng vẫn tốt hơn nhiều so với việc gói hàng kẹt vĩnh viễn trên xe hỏng của A, khiến khách hàng mất đơn mãi mãi.
+
+Cơ chế claim dùng `FOR UPDATE SKIP LOCKED`: mỗi dispatcher chỉ khóa và lấy những row chưa bị dispatcher khác khóa, bỏ qua row đang bị giữ thay vì phải đợi. Cách này phù hợp với Outbox vì các row độc lập với nhau và không yêu cầu thứ tự tuyệt đối.
 
 Reference test từng phát hiện index claim sai làm bốn worker nhận batch `[25, 0, 0, 0]`. Index chứa `lockedUntil` trước các cột order, khiến MySQL không phân phối query như dự tính.
 
@@ -621,27 +964,181 @@ Index sau đó được đổi theo filter và stable order:
 
 Bốn worker sau thay đổi claim đủ 100 intent. `SKIP LOCKED` chỉ tạo concurrency tốt khi execution plan và batch distribution cũng phù hợp.
 
-Production base chưa thêm Outbox table/dispatcher vì chưa có business write sở hữu event. Tạo schema và worker chung chung từ trước sẽ buộc business sau này thích nghi với một contract chưa được xác định.
+Schema tối thiểu cho bảng Outbox:
+
+```sql
+CREATE TABLE OutboxMessage (
+    Id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    MessageId CHAR(36) NOT NULL,
+    RoutingKey VARCHAR(200) NOT NULL,
+    Payload JSON NOT NULL,
+    OccurredAtUtc DATETIME(6) NOT NULL,
+    SentAtUtc DATETIME(6) NULL,
+    LockedBy VARCHAR(100) NULL,
+    LockedUntilUtc DATETIME(6) NULL,
+    -- filter column (SentAtUtc, LockedUntilUtc) đứng trước order column (OccurredAtUtc, Id),
+    -- đúng bài học từ war story ở trên
+    INDEX idx_claim (SentAtUtc, LockedUntilUtc, OccurredAtUtc, Id)
+);
+```
+
+Use case ghi business state và Outbox trong cùng transaction, đúng sơ đồ ở đầu mục:
+
+```csharp
+await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+
+var donHang = new DonHang(request);
+db.DonHang.Add(donHang);
+
+db.OutboxMessage.Add(new OutboxMessage
+{
+    MessageId = Guid.NewGuid(),
+    RoutingKey = "order.created",
+    Payload = JsonSerializer.Serialize(new DonHangDaTaoEvent(donHang.Id, request.Email)),
+    OccurredAtUtc = DateTimeOffset.UtcNow
+});
+
+await db.SaveChangesAsync(cancellationToken);
+await transaction.CommitAsync(cancellationToken);
+```
+
+Dispatcher claim một bounded batch bằng lease, publish, rồi mark sent:
+
+```csharp
+var dispatcherId = Environment.MachineName;
+var now = DateTimeOffset.UtcNow;
+var leaseUntil = now.AddSeconds(30);
+
+var batch = await db.OutboxMessage
+    .FromSqlInterpolated($@"
+        SELECT * FROM OutboxMessage
+        WHERE SentAtUtc IS NULL
+          AND (LockedUntilUtc IS NULL OR LockedUntilUtc < {now})
+        ORDER BY OccurredAtUtc, Id
+        LIMIT 50
+        FOR UPDATE SKIP LOCKED")
+    .ToListAsync(cancellationToken);
+
+foreach (var message in batch)
+{
+    message.LockedBy = dispatcherId;
+    message.LockedUntilUtc = leaseUntil;
+}
+await db.SaveChangesAsync(cancellationToken); // chốt lease trước khi publish
+
+foreach (var message in batch)
+{
+    await publisher.PublishAsync(message.RoutingKey, message.Payload, cancellationToken); // chờ Publisher Confirm
+    message.SentAtUtc = DateTimeOffset.UtcNow;
+    await db.SaveChangesAsync(cancellationToken); // mark sent ngay sau khi confirm, đúng từng message một
+}
+```
+
+Production base hiện chưa thêm schema và dispatcher này vào production thật, vì chưa có business write nào sở hữu event cần phát. Tạo schema và worker chung chung từ trước sẽ buộc business sau này thích nghi với một contract chưa được xác định — code trên là reference implementation, đã kiểm chứng bằng integration test.
 
 ## 14. Ordering trong hệ thống đa instance
 
-RabbitMQ giữ thứ tự trong phạm vi hẹp. Retry, redelivery và nhiều consumer có thể khiến completion order khác publish order.
+Khi hệ thống dịch chuyển sang mô hình phân tán, các cơ chế như thử lại tin nhắn lỗi (Retry ở Mục 11) hay gửi lặp từ hòm thư đi (Outbox Duplicate ở Mục 13) sẽ trực tiếp phá vỡ một giả định trực giác: **Tin nhắn nào phát đi trước thì phải được xử lý xong trước**.
 
-Hai event `DonHangDaXacNhan(version=3)` và `DonHangDaHuy(version=4)` không nên dựa vào thời điểm arrival để quyết định state.
+**Sự thật về hạ tầng — RabbitMQ chỉ bảo toàn tuyệt đối thứ tự tin nhắn trong một phạm vi cực kỳ nghẽn mạch: Một Queue duy nhất, chỉ có đúng một Consumer duy nhất đọc việc, không cấu hình Retry, và không cho phép Requeue.**
 
-Event thay đổi aggregate state cần mang aggregate version. Transaction consumer chỉ áp dụng version hợp lệ hoặc bỏ qua stale event.
+Chỉ cần bạn kích hoạt cơ chế chia tải cho nhiều máy vật lý **(Competing Consumers ở Mục 7)**, hoặc cho phép gửi lại tin nhắn sau sự cố sập nguồn, thứ tự hoàn thành tác vụ **(completion order)** chắc chắn sẽ bị đảo lộn so với thứ tự phát tán ban đầu **publish order)**.
 
-Nếu business bắt buộc serialize theo một key, hệ thống có thể partition topology hoặc dùng database coordination. Cả hai lựa chọn đều làm giảm parallelism và tăng chi phí vận hành.
+#### Hệ quả: state bị ghi đè sai nếu chỉ dựa vào thứ tự đến
 
-Global ordering không cần thiết khi invariant chỉ yêu cầu per-aggregate ordering.
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant C as Consumer
+    participant DB as MySQL
+    P->>C: DonHangDaXacNhan (v3) — lỗi mạng, phải retry
+    P->>C: DonHangDaHuy (v4) — đến trước
+    C->>DB: UPDATE state = Đã hủy
+    Note over C: v3 retry xong, đến trễ hơn v4
+    C->>DB: UPDATE state = Đã xác nhận (ghi đè nhầm!)
+```
 
-Process-local `lock` không bảo vệ dữ liệu dùng chung giữa nhiều instance. Correctness đa instance phải dựa trên database constraint, conditional update, row lock hoặc coordinator phân tán có failure model rõ ràng.
+**Hậu quả** —  Một đơn hàng đáng lẽ đã bị khách hàng hủy bỏ (v4), nhưng vì tin nhắn xác nhận (v3) bị trễ mạng và đến sau, Consumer ngây thơ ghi đè dữ liệu cũ lên dữ liệu mới, khiến đơn hàng bị **"cải tử hoàn sinh"** một cách phi lý trên hệ thống.
+
+#### Giải pháp: Số phiên bản thực thể (Aggregate Version)
+
+Mỗi event làm thay đổi state của một **aggregate** (thực thể nghiệp vụ gốc mà event tác động, ví dụ `DonHang`) cần mang theo **aggregate version** — một số đếm tăng dần mỗi lần aggregate đổi state:
+
+- Consumer chỉ áp dụng event nếu version của nó mới hơn version đang lưu trong database.
+- Event có version bằng hoặc nhỏ hơn là stale event — bỏ qua (no-op), bất kể thứ tự đến thực tế.
+
+Cách hiện thực đơn giản nhất là một conditional update —  `UPDATE` chỉ thành công khi version mới lớn hơn version đang lưu, còn lại tự thất bại (0 row affected) mà không cần đọc trước để so sánh:
+
+```sql
+UPDATE DonHang
+SET State = @newState, Version = @newVersion
+WHERE Id = @id AND Version < @newVersion;
+```
+
+```csharp
+var rowsAffected = await db.Database.ExecuteSqlInterpolatedAsync($@"
+    UPDATE DonHang
+    SET State = {newState}, Version = {newVersion}
+    WHERE Id = {donHangId} AND Version < {newVersion}",
+    cancellationToken);
+
+if (rowsAffected == 0)
+{
+    // Version hiện tại đã mới hơn hoặc bằng — đây là stale event, coi như đã xử lý xong
+    await _channel.BasicAckAsync(deliveryTag, multiple: false);
+    return;
+}
+```
+
+#### Khi business bắt buộc xử lý tuần tự tuyệt đối
+
+Nếu mọi event của cùng một `DonHang` phải xử lý đúng thứ tự thời gian, có hai hướng:
+
+- **Partition topology** — định tuyến mọi event cùng một key (ví dụ `DonHangId`) luôn vào một queue/consumer cố định, ví dụ qua **Consistent Hash Exchange** của RabbitMQ hay partition của Kafka.
+- **Database coordination** — dùng row lock hoặc khóa cứng ở tầng lưu trữ để ép các worker xếp hàng chờ nhau.
+
+Consistent Hash Exchange cần bật plugin đi kèm RabbitMQ (`rabbitmq-plugins enable rabbitmq_consistent_hash_exchange`), sau đó publish bằng chính `DonHangId` làm routing key — exchange sẽ luôn hash cùng một `DonHangId` về đúng một queue, bất kể thứ tự publish:
+
+```csharp
+await _channel.ExchangeDeclareAsync("food.events.partitioned", "x-consistent-hash", durable: true);
+
+// mỗi queue nhận một "trọng số" (weight) qua binding key dạng số, quyết định tỉ lệ chia tải
+await _channel.QueueBindAsync("order-worker-1", "food.events.partitioned", routingKey: "10");
+await _channel.QueueBindAsync("order-worker-2", "food.events.partitioned", routingKey: "10");
+
+// publish dùng DonHangId làm routing key: cùng một DonHangId luôn hash về cùng một queue,
+// nên mọi event của một đơn hàng luôn được đúng một worker xử lý tuần tự
+await _channel.BasicPublishAsync(
+    exchange: "food.events.partitioned",
+    routingKey: donHang.Id.ToString(),
+    mandatory: true,
+    basicProperties: properties,
+    body,
+    cancellationToken);
+```
+
+> **Lưu ý:** Cả hai hướng đều triệt tiêu khả năng xử lý song song và tăng chi phí vận hành. Global ordering không cần thiết khi invariant chỉ yêu cầu per-aggregate ordering — bảo toàn thứ tự trong phạm vi từng aggregate là đủ.
+
+#### Correctness đa instance không đến từ lock trong process
+
+Một lỗi sơ đẳng là dùng `lock` hay `SemaphoreSlim` của C# để bảo vệ dữ liệu — các cơ chế này chỉ hoạt động trong một process, không thể chia sẻ trạng thái giữa nhiều instance vật lý độc lập.
+
+Tính chính xác của dữ liệu trong môi trường đa tiến trình bắt buộc phải dựa vào các chốt chặn hạ tầng:
+
+- Ràng buộc phía ở database **(Database constraint)**.
+- Cơ chế cập nhật có điều kiện **(Conditional update / Optimistic Concurrency)**.
+- Khóa dòng trực tiếp **(Row lock)**.
+- Hoặc các hệ thống quản lý khóa phân tán chuyên dụng **(Distributed Coordinator)** có mô hình xử lý lỗi rõ ràng.
 
 ## 15. Tính nhất quán của tồn kho nhiều lô
 
-Giả sử tồn còn 10, hai đơn đồng thời mỗi đơn đặt 7. Hai consumer cùng đọc 10 rồi cùng ghi 3 tạo lost update: hệ thống đã chấp nhận 14 nhưng số dư chỉ giảm 7. RabbitMQ không giải quyết race này.
+Mục 14 giải quyết bài toán thứ tự xử lý trên một thực thể độc lập (Aggregate). Tuy nhiên, hệ thống phân tán còn đối mặt với một loại xung đột dữ liệu (Race Condition) nguy hiểm khác không phụ thuộc vào thứ tự **— Nhiều Consumer cùng lúc đọc và ghi trên một tài nguyên dùng chung.**
 
-Với nhiều lô, strict FEFO yêu cầu chọn lô hết hạn sớm trước:
+Giả sử tồn còn 10, hai đơn đồng thời mỗi đơn đặt 7. Hai consumer cùng đọc 10 rồi cùng ghi 3 tạo lost update: hệ thống đã chấp nhận 14 nhưng số dư chỉ giảm 7. **RabbitMQ hoàn toàn bất lực trước lỗi này** — nó nằm ở tầng dữ liệu, không phải tầng messaging.
+
+#### Chiến lược FEFO nghiêm ngặt và giải pháp Khóa dòng (FOR UPDATE)
+
+Với nhiều lô, strict FEFO (xuất lô hết hạn sớm trước) yêu cầu chọn đúng lô hết hạn sớm nhất, dù bao nhiêu consumer cùng tranh chấp:
 
 ```mermaid
 sequenceDiagram
@@ -655,23 +1152,38 @@ sequenceDiagram
     B->>DB: Allocate phần còn lại hoặc reject
 ```
 
-Mọi transaction lock candidate lots theo cùng thứ tự:
+#### Tránh deadlock bằng Thứ tự khóa cố định
+
+Mọi transaction phải lock candidate lots theo cùng một thứ tự cố định — nếu transaction A lock lô 1 rồi lô 2, còn transaction B lock lô 2 rồi lô 1, hai bên có thể chờ chéo nhau vô thời hạn (deadlock). Khóa nhất quán theo cùng thứ tự loại bỏ khả năng đó:
 
 ```text
 expiresAt → receivedAt → id
 ```
 
-`SKIP LOCKED` có thể bỏ qua lô sớm nhất đang bị transaction khác khóa và chọn lô muộn hơn. Cơ chế này tăng throughput nhưng thay đổi business semantics, nên không phù hợp với strict FEFO.
+#### Vì sao không dùng SKIP LOCKED ở đây
 
-Với 100 shop và 100.000 thẻ kho, query bắt đầu bằng composite index theo `tenant + shop + product`, sau đó mới tới sort key.
+Mục 13 dùng `SKIP LOCKED` để tăng throughput cho Outbox, vì các row ở đó độc lập và thứ tự xử lý không quan trọng. Ở đây thì ngược lại: `SKIP LOCKED` sẽ bỏ qua lô sớm nhất đang bị transaction khác khóa và chọn lô muộn hơn — tăng throughput nhưng phá vỡ đúng thứ tự FEFO, nên không phù hợp.
 
-Reference run dùng một hot `shop + product` chứa 500 lô. Query lấy 10 candidate mất khoảng `0,21 ms` và không scan toàn bộ 100.000 row.
+#### Index cho truy vấn FEFO ở quy mô lớn
 
-Con số này mô tả môi trường test, không phải production SLA.
+Với 100 shop và 100.000 thẻ kho, câu lệnh truy vấn tìm lô hàng rất dễ gây chậm hệ thống nếu phải quét toàn bộ bảng dữ liệu (table scan). 
+
+Để tối ưu, cần xây dựng một Chỉ mục hỗn hợp **(Composite Index)** kết hợp giữa bộ lọc điều kiện và khóa sắp xếp:
+
+```sql
+-- Nhóm bộ lọc (Tenant + Shop + Product) đứng trước, nhóm sắp xếp đứng sau
+CREATE INDEX IX_Inventory_FEFO
+ON WarehouseLots (tenantId, shopId, productId, expiresAt, receivedAt, id);
+```
+**Kết quả đo lường thực tế:** Reference run dùng một hot `shop + product` chứa 500 lô. Query lấy 10 lô ứng viên mất khoảng `0,21 ms` và không scan toàn bộ 100.000 row. Con số này mô tả môi trường test, không phải production SLA.
 
 ## 16. Quorum Queue và RabbitMQ Cluster
 
-Durable queue trên một node vẫn không chịu được node failure. Quorum queue sao chép message theo majority giữa các RabbitMQ node.
+Các mục trước xử lý race condition ở tầng dữ liệu, giả định RabbitMQ luôn sẵn sàng. Nhưng bản thân broker cũng có thể chết — không phải do bug trong code, mà do hạ tầng: node bị mất điện, ổ đĩa hỏng, máy chủ ngừng hoạt động.
+
+`durable: true` (đã dùng từ mục 5.4) chỉ đảm bảo message sống sót qua việc RabbitMQ process khởi động lại trên cùng node — nó không giúp gì nếu chính node đó chết hẳn, vì message vẫn chỉ nằm trên một đĩa duy nhất. Quorum queue giải quyết đúng lỗ hổng này bằng thuật toán đồng thuận Raft: nó duy trì nhiều bản sao của mỗi message trên một số lẻ node (thường là 3 hoặc 5 — số lẻ để majority luôn ra một kết quả rõ ràng, không thể chia phiếu 50/50).
+
+#### Cơ chế sống sót qua sự cố hạ tầng
 
 ```mermaid
 sequenceDiagram
@@ -682,12 +1194,19 @@ sequenceDiagram
     P->>L: Publish persistent message
     L->>F1: Replicate
     L->>F2: Replicate
+    F1-->>L: Ack
+    Note over L: Đã đạt majority, confirm cho publisher
     Note over L: Leader dừng
     F1->>F1: Election leader mới
     P->>F1: Recovery và publish tiếp
 ```
 
-Reference test dùng cluster ba node và dừng leader trong lúc publish.
+- **Xác nhận theo đa số** — khi publish một persistent message, leader không confirm ngay cho publisher. Nó phải chờ replicate thành công tới đủ majority node (với cluster 3 node là leader + ít nhất 1 follower) rồi mới confirm — đây chính là ý nghĩa của "quorum".
+- **Tự động bầu lại leader** — nếu leader chết đột ngột, các follower còn lại tự bầu ra leader mới và tiếp tục nhận publish, không cần can thiệp thủ công.
+
+#### Kết quả đo lường thực tế
+
+Reference test dùng cluster ba node, dừng leader trong lúc publish 2.000 logical message:
 
 | Kết quả | Giá trị |
 |---|---:|
@@ -696,15 +1215,28 @@ Reference test dùng cluster ba node và dừng leader trong lúc publish.
 | Message thiếu | 0 |
 | Message trùng | 0 |
 
-Kết quả chỉ chứng minh fault đã mô phỏng. Network partition, disk exhaustion và lỗi rolling upgrade cần các profile riêng.
+Kết quả chỉ chứng minh fault đã mô phỏng — một node chết đơn lẻ. Network partition, disk exhaustion và lỗi rolling upgrade phức tạp hơn nhiều và cần các profile riêng.
 
-Production quorum topology thường cần tối thiểu ba node trải trên failure domain phù hợp. Replication phải đi cùng disk/memory alarm, partition monitoring, capacity và runbook.
+#### Lưu ý khi triển khai production
 
-Cluster không thay thế backup. Replication có thể sao chép cả thao tác xóa hoặc dữ liệu sai.
+- Production quorum topology thường cần tối thiểu ba node, trải trên các failure domain riêng biệt (khác rack, khác availability zone) để một sự cố mất điện không kéo sập cả cụm.
+- Replication phải đi cùng disk/memory alarm, partition monitoring, capacity và runbook.
+
+> **Lưu ý:** Cluster không thay thế backup. Replication chỉ nhân bản trạng thái hiện tại sang mọi node gần như ngay lập tức — nếu một thao tác xóa nhầm hoặc dữ liệu sai được ghi vào, nó cũng được replicate đi ngay, và không có điểm khôi phục nào trước đó để quay lại.
 
 ## 17. Load Testing và Business Invariant
 
-Reference reliability profile:
+Các mục trước kiểm chứng từng cơ chế riêng lẻ — mục này chạy tất cả cùng lúc dưới tải. Mục tiêu không phải đo throughput, mà xem business invariant có đứng vững dưới tranh chấp tài nguyên hay không — thứ mà messages/second một mình không nói lên được, phải đặt cạnh transaction latency, lock contention và trạng thái cuối cùng trong database.
+
+#### Cấu hình kịch bản kiểm thử
+
+Reference reliability profile cố tình tiêm vào đúng những failure mode đã phân tích ở các mục trước:
+
+- Duplicate publish từ Outbox (mục 13).
+- Transient failure cần retry (mục 11).
+- Crash giữa business commit và ACK (mục 8).
+
+Prefetch được tính theo công thức ở mục 10:
 
 ```text
 100 shop
@@ -717,29 +1249,70 @@ prefetch 32
 1% crash sau business commit, trước ACK
 ```
 
-| Metric | Kết quả |
-|---|---:|
-| Physical messages | 105.000 |
-| Inbox rows | 100.000 |
-| Business effects | 100.000 |
-| Duplicate business effects | 0 |
-| Missing logical messages | 0 |
-| Transient failures | 2.000 |
-| Post-commit crashes | 1.000 |
-| Redeliveries | 3.000 |
-| Publish duration | 242,40 giây |
-| Consume duration | 113,19 giây |
-| Tổng thời gian | khoảng 5 phút 57 giây |
+#### Kết quả đo lường
 
-Hot shop nhận 50% message. Thiết kế đầu tiên cập nhật một counter row duy nhất cho mỗi shop.
+| Metric | Kết quả | Ý nghĩa |
+|---|---:|---|
+| Physical messages | 105.000 | Tổng số tin nhắn thực tế chạy qua RabbitMQ (bao gồm cả tin nhắn trùng). |
+| Inbox rows | 100.000 | Inbox chặn đúng 100.000 message gốc, không đếm trùng |
+| Business effects | 100.000 | Số đơn hàng thực tế tạo thành công trong MySQL |
+| Duplicate business effects | 0 | Không đơn nào bị tạo trùng |
+| Missing logical messages | 0 | Không đơn nào bị mất |
+| Transient failures | 2.000 | Số lần retry được kích hoạt |
+| Post-commit crashes | 1.000 | Số lần crash giữa commit và ACK, được cứu nhờ thứ tự commit trước ACK (mục 8) |
+| Redeliveries | 3.000 | Số message được RabbitMQ giao lại |
+| Publish duration / Consume duration | 242,40 / 113,19   | Thời gian bắn tin nhắn và thời gian dọn sạch hàng đợi. | 
+| Tổng thời gian | ~ 5 phút 57 giây | |
 
-Smoke test 1.000 message khi đó mất khoảng 33,4 giây. Sau khi effect được chia theo `shop + inventory bucket`, cùng profile giảm xuống khoảng 4–10 giây tùy lần chạy.
+Physical messages (105.000) vượt logical message (100.000) đúng bằng 5% duplicate publish đã tiêm vào. Nhưng Inbox vẫn hội tụ về đúng 100.000 business effect, 0 duplicate, 0 missing — đúng invariant mà toàn bộ Outbox, Inbox và retry được thiết kế để bảo vệ.
 
-Sự khác biệt không đến từ RabbitMQ tuning. Database model ban đầu biến một shop thành hot row, khiến consumer xếp hàng ở row lock.
+#### Bài học xương máu về "Điểm nghẽn Cửa hàng Hot" (Hot Shop Bottleneck)
 
-Load test vì thế phải kiểm tra transaction latency, lock wait, connection pool và business outcomes. Chỉ số messages/second không thể giải thích bottleneck này.
+Trong thiết kế ban đầu, hệ thống giả lập một kịch bản thực tế: Có một cửa hàng siêu hot nhận tới **50% tổng lượng đơn hàng** của toàn hệ thống. Để đếm số đơn, code ban đầu thực hiện tăng một bộ đếm (counter row) duy nhất cho mỗi shop dưới MySQL.
+
+**Thất bại ở thiết kế cũ** — Khi chạy thử nghiệm nhỏ (Smoke test) chỉ với 1.000 tin nhắn, hệ thống đã mất tới 33.4 giây để xử lý.
+
+##### Vì sao thiết kế cũ chậm: hot row
+
+Thiết kế cũ gom toàn bộ tồn kho của một shop vào một dòng duy nhất, ví dụ cột `TotalStock` của bảng `ShopInventory`. Khi 1.000 đơn hàng đổ vào cùng lúc cho shop đó, 32 worker cùng gửi `UPDATE` xuống đúng một dòng để trừ kho. MySQL phải khóa dòng đó (row lock) để tránh trừ kho âm — worker đầu tiên vào làm, 31 worker còn lại đứng xếp hàng chờ. Xử lý song song biến thành tuần tự, và phần lớn 33,4 giây đó là thời gian chờ nhả khóa (lock wait), không phải thời gian xử lý thật.
+
+**Tối ưu hóa thiết kế mới** — Sau khi dữ liệu được phân rã nhỏ ra theo cơ chế Shop + Inventory Bucket (chia nhỏ dòng đếm tổng thành nhiều ô nhớ độc lập để giảm tranh chấp khóa), thời gian xử lý cùng một kịch bản lập tức giảm xuống chỉ còn từ 4 đến 10 giây.
+
+##### Cách sửa: chia tồn kho thành nhiều bucket độc lập
+
+Thay vì một dòng lưu tổng tồn kho, tồn kho được băm thành nhiều bucket, mỗi bucket là một dòng độc lập. Ví dụ shop hot có 100 đơn vị tồn kho, chia thành 4 bucket 25 đơn vị mỗi bucket:
+
+```text
+Bucket 1: 25
+Bucket 2: 25
+Bucket 3: 25
+Bucket 4: 25
+```
+
+Mỗi lần trừ kho, worker chọn ngẫu nhiên (hoặc round-robin) một bucket còn hàng để trừ, thay vì luôn nhắm vào một dòng cố định. Tranh chấp khóa chia đều ra 4 dòng thay vì dồn hết vào một dòng, nên nhiều worker có thể làm việc song song trên các bucket khác nhau cùng lúc.
+
+##### Đánh đổi: trừ kho nhanh hơn, đọc tổng kho phải cộng lại
+
+Tổng tồn kho thực tế bằng tổng các bucket cộng lại:
+
+```text
+Tổng tồn kho = Bucket 1 + Bucket 2 + Bucket 3 + Bucket 4
+```
+
+- Trừ kho: worker chỉ cần tìm một bucket còn hàng bất kỳ để trừ — tranh chấp khóa giảm tối đa.
+- Xem tổng tồn: cần chạy `SUM(Quantity)` trên toàn bộ bucket của shop đó để ra con số cuối cùng.
+
+Đây là đánh đổi "chia để trị": tách một điểm nghẽn khóa thành nhiều điểm nhỏ hơn, đổi lấy việc đọc tổng phải tính toán thêm.
+
+Sự bứt phá về tốc độ này **hoàn toàn không đến từ việc tinh chỉnh (tuning) cấu hình của RabbitMQ**. Điểm nghẽn chí mạng của thiết kế cũ nằm ở chỗ — Việc bắt tất cả các luồng cùng vào cập nhật một dòng dữ liệu duy nhất của Shop Hot đã biến dòng đó thành một Hot Row, ép các máy Worker dù có khỏe đến mấy cũng phải đứng xếp hàng dài chờ đợi khóa dòng *(lock wait)*.
+
+Thiết kế Database tốt hay xấu mới là thứ quyết định vận mệnh của hệ thống phân tán, chứ không phải do công nghệ Message Broker nhanh hay chậm.
 
 ## 18. RabbitMQ Management UI
+
+Mục 17 đo các chỉ số đó qua integration test, chạy một lần rồi đọc kết quả. Trong vận hành thực tế, cùng loại chỉ số này cần được theo dõi liên tục — đó là việc của Management UI.
+
+#### Bản đồ chỉ số trên dashboard
 
 Dashboard biểu diễn technical state của broker:
 
@@ -754,19 +1327,24 @@ Dashboard biểu diễn technical state của broker:
 | ACK rate | Tốc độ consumer xác nhận |
 | Redelivered | Delivery đã được giao lại |
 
-`Ready` tăng liên tục nghĩa là arrival rate lớn hơn completion rate. Trước khi tăng worker, kiểm tra ACK rate, handler duration, MySQL pool và downstream latency.
+#### Đọc dashboard để tìm đúng bottleneck
 
-`Unacked` chạm đúng trần `consumer × prefetch` cho thấy capacity đang nằm trong handler/downstream. Tăng prefetch lúc này thường chỉ tăng memory và thời gian message nằm ngoài queue.
+Phản xạ phổ biến khi hệ thống chậm là tăng ngay số worker hoặc nâng cấu hình. Nhưng từng chỉ số ở trên trỏ tới một nguyên nhân khác nhau — tăng nhầm chỗ chỉ tốn thêm tài nguyên mà không giải quyết được gì:
 
-Redelivery tăng có thể đến từ process restart, connection recovery, NACK hoặc crash sau commit. Nó không tự nói business effect bị duplicate; cần đối chiếu Inbox deduplication metrics.
+- **`Ready` tăng liên tục** nghĩa là arrival rate lớn hơn completion rate. Trước khi tăng worker, kiểm tra ACK rate, handler duration, MySQL pool và downstream latency — worker mới không giúp được nếu nút thắt nằm ở downstream.
+- **`Unacked` chạm đúng trần** `consumer × prefetch` đã tính ở mục 10 — nghĩa là điểm nghẽn không nằm ở RabbitMQ, mà ở chính consumer hoặc downstream đang xử lý không kịp. Tăng prefetch lúc này thường chỉ tăng memory và thời gian message nằm ngoài queue, không tăng throughput thật.
+- **Redelivery tăng vọt** có thể đến từ process restart, connection recovery, NACK hoặc crash sau commit (mục 8). Con số này chỉ báo hiệu sự cố hạ tầng — nó không tự nói business effect bị duplicate — cần đối chiếu Inbox deduplication metrics (mục 9) để biết chắc.
+- **DLQ tăng cao** cần phân loại failure trước khi requeue (mục 11). Bulk requeue poison message khi code chưa sửa chỉ đưa sự cố quay lại main queue.
 
-DLQ tăng cần phân loại failure trước khi requeue. Bulk requeue poison message khi code chưa sửa chỉ đưa sự cố quay lại main queue.
-
-Management UI không phải business audit. `ACK` không chứng minh email tới người nhận, tiền đã thu hoặc tồn kho đúng. Business state vẫn nằm trong database và external provider outcome.
+> **Lưu ý:** Management UI chỉ quản lý technical state, không phải business audit. `ACK` chỉ chứng minh RabbitMQ đã hoàn thành việc giao message — nó không chứng minh email đã tới người nhận, tiền đã thu đủ, hay tồn kho dưới database đã đúng. Business state luôn nằm ở database và kết quả phản hồi thực tế từ external provider.
 
 ## 19. Capacity planning
 
-Load parameter xuất phát từ traffic và downstream ceiling:
+Mục 18 đọc dashboard để chẩn đoán bottleneck sau khi nó đã xảy ra. Mục này làm ngược lại — tính trước số consumer và prefetch cần thiết dựa trên traffic dự kiến, trước khi hệ thống chạy thật.
+
+#### Tham số đầu vào và công thức
+
+Hai tham số đầu vào phải lấy từ traffic thực tế hoặc kỳ vọng kinh doanh, không phải đoán — `peakArrivalRate` (tốc độ message đổ vào lúc cao điểm) và `headroom` (biên an toàn cộng thêm, để hệ thống không chạy sát 100% công suất ngay tại đỉnh tải). Từ đó suy ra target throughput cần đạt, rồi tính lại `globalConsumers` và `maximumUnacked` theo đúng công thức đã dùng ở mục 10:
 
 ```text
 messageCount       = peakArrivalRate × testDuration
@@ -775,73 +1353,92 @@ globalConsumers    = instanceCount × consumersPerInstance
 maximumUnacked     = globalConsumers × prefetch
 ```
 
-Sau đó áp constraint:
+Peak 500 message/giây trong 10 phút tạo 300.000 message. Với headroom 40%, target drain rate là 700 message/giây (500 × 1,4).
+
+#### Ràng buộc cứng khi lên production
+
+Con số lý thuyết ở trên chỉ là điểm khởi đầu, không phải cấu hình cuối. Nó còn phải nằm trong đúng ceiling đã thấy ở mục 17 (connection pool) và mục 10 (downstream safe concurrency):
 
 ```text
 globalConsumers ≤ DB connections dành cho worker
 globalConsumers ≤ downstream safe concurrency
 ```
 
-Peak 500 message/giây trong 10 phút tạo 300.000 message. Với headroom 40%, target drain rate là 700 message/giây.
+Target throughput là đầu vào để thử số consumer thật, không phải kết quả cuối cùng. Một cấu hình lấy từ môi trường khác không thể trở thành production default nếu chưa được đo lại trên chính hệ thống này.
 
-Target này là đầu vào để thử số consumer. Một cấu hình lấy từ môi trường khác không thể trở thành production default nếu chưa được đo lại.
+#### Chuẩn hoá load profile để so sánh được
 
-Mỗi profile cần ghi lại:
+Để hai con số throughput có thể so sánh có ý nghĩa, mỗi profile cần ghi lại:
 
-- environment và CPU/RAM;
-- broker topology và MySQL configuration;
-- payload size và persistence mode;
-- confirm mode, consumer count và prefetch;
-- failure injection.
+- Environment và CPU/RAM.
+- Broker topology và MySQL configuration.
+- Payload size và persistence mode.
+- Confirm mode, consumer count và prefetch.
+- Failure injection.
 
-Nếu thiếu các dữ kiện này, hai con số throughput không thể được so sánh có ý nghĩa.
+Thiếu bất kỳ dữ kiện nào ở trên, hai con số throughput đo được từ hai lần chạy khác nhau không còn cùng ý nghĩa để so sánh.
 
-## 20. Production Checklist cho .NET 6
+## 20. Production Checklist
 
-Trước khi phát event nghiệp vụ đầu tiên:
+Mục 19 tính ra con số hạ tầng cần thiết. Trước khi phát event nghiệp vụ đầu tiên, mọi invariant đã phân tích xuyên suốt bài cần được xác nhận lại một lần, ở một chỗ:
 
-- contract có `MessageId`, stable event name, version, timestamp, correlation và tenant context;
-- connection được tái sử dụng theo process, channel có owner rõ ràng;
-- exchange và queue durable, message persistent nếu yêu cầu survive restart;
-- Publisher Confirm và mandatory routing được xử lý thành failure quan sát được;
-- manual ACK chỉ xảy ra sau durable business outcome;
-- consumer idempotency được kiểm chứng bằng duplicate delivery thật;
-- retry phân biệt transient/permanent, có giới hạn và DLQ;
-- business write bắt buộc phát event dùng Outbox;
-- Inbox và mutation dùng cùng MySQL transaction;
-- tenant/shop scope có mặt trong query, cache key và unique constraint;
-- global concurrency không vượt DB/downstream ceiling;
-- metrics, alert và runbook đã tồn tại trước khi tăng instance;
-- secret không nằm trong source control; production dùng TLS và least privilege;
-- producer/consumer hỗ trợ contract compatibility trong rolling deployment.
+#### Contract và kết nối
+
+- Contract có `MessageId`, stable event name, version, timestamp, correlation và tenant context (mục 5.1).
+- Connection được tái sử dụng theo process, channel có owner rõ ràng (mục 5.3).
+
+#### Hạ tầng và độ tin cậy
+
+- Exchange và queue durable, message persistent nếu yêu cầu survive restart (mục 3.1, 5.4).
+- Publisher Confirm và mandatory routing được xử lý thành failure quan sát được (mục 6, 12).
+- Manual ACK chỉ xảy ra sau durable business outcome (mục 8).
+
+#### Chống trùng và xử lý lỗi
+
+- Consumer idempotency được kiểm chứng bằng duplicate delivery thật (mục 9).
+- Retry phân biệt transient/permanent, có giới hạn và DLQ (mục 11).
+- Business write bắt buộc phát event dùng Outbox (mục 13).
+- Inbox và mutation dùng cùng MySQL transaction (mục 9).
+
+#### Cô lập và giới hạn tải
+
+- Tenant/shop scope có mặt trong query, cache key và unique constraint (mục 9, 15).
+- Global concurrency không vượt DB/downstream ceiling (mục 10, 19).
+- Metrics, alert và runbook đã tồn tại trước khi tăng instance (mục 18).
+
+#### Bảo mật và triển khai
+
+- Secret không nằm trong source control — production dùng TLS và least privilege (mục 5.2).
+- Producer/consumer hỗ trợ contract compatibility trong rolling deployment (mục 14).
 
 Foundation hiện chạy trên .NET 6 và `RabbitMQ.Client 7.2.2`.
 
-.NET 6 đã hết vòng đời hỗ trợ. Dự án vẫn giữ target đã chốt, nhưng production roadmap cần kế hoạch nâng runtime.
+.NET 6 đã hết vòng đời hỗ trợ. Dự án vẫn giữ target đã chốt, nhưng production roadmap cần kế hoạch nâng lên một bản LTS mới hơn (ví dụ .NET 8) để tiếp tục nhận bản vá bảo mật.
 
 Việc nâng runtime không làm thay đổi các invariant về ACK, idempotency, Outbox hoặc concurrency.
 
 ## 21. Phạm vi của Production Foundation
 
-Đã có trong `FoodDelivery.Infrastructure`:
+Đối chiếu với `FoodDelivery.Infrastructure`, đây là trạng thái hiện tại của từng hạng mục đã phân tích xuyên suốt bài:
 
-- validated `RabbitMqOptions`;
-- một long-lived connection manager trên mỗi process;
-- confirmed persistent publisher với mandatory routing;
-- integration-event wire metadata;
-- automatic connection/topology recovery;
-- readiness health check;
-- integration tests chạy với RabbitMQ thật.
+- Validated `RabbitMqOptions` -- đã làm (mục 5.2).
+- Một long-lived connection manager trên mỗi process -- đã làm (mục 5.3).
+- Confirmed persistent publisher với mandatory routing -- đã làm (mục 5.4, 12).
+- Integration-event wire metadata -- đã làm (mục 5.1).
+- Automatic connection/topology recovery -- đã làm (mục 5.3).
+- Readiness health check -- đã làm (mục 5.5).
+- Integration tests chạy với RabbitMQ thật -- đã làm.
+- Business queue và consumer -- chưa làm (mục 3, 7).
+- Outbox/Inbox schema cùng dispatcher -- chưa làm (mục 9, 13).
+- Retry/DLQ topology -- chưa làm (mục 11).
+- Aggregate version handler -- chưa làm (mục 14).
+- Inventory allocator và strict FEFO -- chưa làm (mục 15).
+- Quorum queue / cluster topology cho production -- chưa làm (mục 16).
+- Metrics, alert và runbook cho RabbitMQ -- chưa làm (mục 18, 20).
+- Secret management, TLS và least-privilege cho credential -- chưa làm (mục 5.2, 20).
+- Capacity plan đo trên traffic production thật -- chưa làm (mục 19).
 
-Chưa đưa vào production:
-
-- business queue và consumer;
-- Outbox/Inbox schema cùng dispatcher;
-- retry/DLQ topology;
-- aggregate version handler;
-- inventory allocator và strict FEFO.
-
-Những phần này không bị bỏ quên. Chúng đang ở test-only reference implementation để chứng minh failure model trước khi business module thật xác định transaction, table ownership và contract.
+Những phần "chưa làm" không bị bỏ quên. Chúng đang ở test-only reference implementation để chứng minh failure model trước khi business module thật xác định transaction, table ownership và contract.
 
 ## 22. Thuật ngữ
 
@@ -874,3 +1471,36 @@ Những phần này không bị bỏ quên. Chúng đang ở test-only reference
 - [RabbitMQ .NET Client Guide](https://www.rabbitmq.com/client-libraries/dotnet-api-guide) — connection, channel, recovery và concurrency của .NET client.
 - [Consumer Acknowledgements and Publisher Confirms](https://www.rabbitmq.com/docs/confirms) — hai chiều reliability độc lập.
 - [Quorum Queues](https://www.rabbitmq.com/docs/quorum-queues) — replication, majority và failure behavior.
+
+## 24. Hướng mở rộng tiếp theo
+
+Toàn bộ bài chỉ xoay quanh RabbitMQ trong phạm vi một service. Khi hệ thống lớn lên và tách thành nhiều service độc lập, bốn nhóm chủ đề dưới đây là hướng mở rộng tự nhiên tiếp theo.
+
+#### Kiến trúc lưu trữ nâng cao
+
+Worker chạy nhanh hay chậm phần lớn phụ thuộc vào database, không phải broker (đã thấy rõ ở mục 17):
+
+- **Database sharding và partitioning** — khi bảng `DonHang` hay `OutboxMessage` phình tới hàng trăm triệu dòng, chia nhỏ ra nhiều phân vùng hoặc nhiều server vật lý mà code vẫn chạy được.
+- **Read/write splitting** — một DB master chuyên ghi, một cụm DB slave chuyên đọc (báo cáo, tìm kiếm), giảm áp lực cho node ghi chính.
+- **Các loại lock trong MySQL/PostgreSQL** — shared lock, exclusive lock, intention lock, gap lock (chống phantom read) — đào sâu hơn phần row lock đã dùng ở mục 15.
+
+#### Phân rã hệ thống và distributed systems
+
+Khi tách một hệ thống monolith thành nhiều service nói chuyện qua RabbitMQ:
+
+- **Saga pattern** — nối tiếp tự nhiên của Outbox/Inbox (mục 9, 13): khi một luồng nghiệp vụ trải dài qua nhiều service (trừ tiền → trừ kho → giao hàng), cần một cơ chế compensating transaction để hoàn tác nếu một bước giữa chừng thất bại.
+- **API Gateway và service mesh** (Envoy, Istio) — định tuyến traffic, bảo mật giữa các service nội bộ, circuit breaker để tránh sập dây chuyền.
+- **Distributed tracing** (OpenTelemetry, Jaeger/Zipkin) — nối `CorrelationId` đã có từ mục 5.4 xuyên suốt Web API → RabbitMQ → Worker → database thành một trace duy nhất, để thấy ngay latency đang nghẽn ở bước nào.
+
+#### Resilience engineering
+
+Thiết kế theo giả định "mọi thứ rồi sẽ sập":
+
+- **Rate limiting và throttling** — token bucket hoặc leaky bucket kết hợp Redis, giới hạn request theo từng khách hàng thay vì để một client spam làm nghẽn cả hệ thống.
+- **Idempotent API design** — không chỉ consumer của RabbitMQ cần chống trùng (Inbox ở mục 9) — public API cũng cần chống trùng khi client bấm nút đặt đơn hai lần do lag mạng.
+- **Graceful shutdown** — khi deploy phiên bản mới, worker cũ ngừng nhận message mới, xử lý nốt các message đang cầm (`Unacked`, đã nói ở mục 18) rồi mới đóng tiến trình, thay vì bị kill đột ngột.
+
+#### Cloud-native và hạ tầng tự động
+
+- **Kubernetes và autoscaling theo message** — dùng KEDA để tự tăng/giảm số worker dựa trên `Ready` rate của RabbitMQ (mục 18) thay vì chỉ dựa vào CPU/RAM.
+- **Infrastructure as code** (Terraform, Pulumi) — định nghĩa RabbitMQ cluster, MySQL, network bằng code, dựng lại một môi trường giống hệt production trong vài phút.

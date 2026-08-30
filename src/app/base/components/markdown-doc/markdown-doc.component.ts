@@ -1,6 +1,7 @@
 import { AfterViewInit, Component, ElementRef, Input, OnDestroy } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { NzImageService } from 'ng-zorro-antd/image';
+import { MermaidAPI } from 'ngx-markdown';
 
 export interface TocItem {
   id: string;
@@ -15,6 +16,27 @@ export interface TocItem {
 })
 export class MarkdownDocComponent implements AfterViewInit, OnDestroy {
   @Input() docSrc?: string;
+  readonly mermaidOptions: MermaidAPI.Config = {
+    theme: MermaidAPI.Theme.Dark,
+    themeVariables: {
+      primaryColor: '#1e293b',
+      primaryBorderColor: '#64748b',
+      primaryTextColor: '#e2e8f0',
+      secondaryColor: '#1e293b',
+      secondaryTextColor: '#e2e8f0',
+      tertiaryColor: '#1e293b',
+      tertiaryTextColor: '#e2e8f0',
+      textColor: '#e2e8f0',
+      lineColor: '#94a3b8',
+      mainBkg: '#1e293b',
+      nodeBorder: '#64748b',
+      clusterBkg: '#1e293b',
+      clusterBorder: '#64748b',
+      edgeLabelBackground: '#1e293b',
+      labelTextColor: '#e2e8f0',
+      titleColor: '#e2e8f0',
+    },
+  };
   tocItems: TocItem[] = [];
   activeId: string | null = null;
 

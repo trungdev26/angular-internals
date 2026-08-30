@@ -1,5 +1,11 @@
 <div class="doc-layout">
-  <markdown class="markdown-body" mermaid [src]="docSrc" (ready)="onReady()"></markdown>
+  <markdown
+    class="markdown-body"
+    mermaid
+    [mermaidOptions]="mermaidOptions"
+    [src]="docSrc"
+    (ready)="onReady()"
+  ></markdown>
 
   <nav class="doc-toc" *ngIf="tocItems.length" aria-label="Mục lục trang">
     <div class="doc-toc-title">Trên trang này</div>
