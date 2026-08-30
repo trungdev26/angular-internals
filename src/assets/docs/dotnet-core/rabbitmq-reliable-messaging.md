@@ -1504,3 +1504,234 @@ Thiết kế theo giả định "mọi thứ rồi sẽ sập":
 
 - **Kubernetes và autoscaling theo message** — dùng KEDA để tự tăng/giảm số worker dựa trên `Ready` rate của RabbitMQ (mục 18) thay vì chỉ dựa vào CPU/RAM.
 - **Infrastructure as code** (Terraform, Pulumi) — định nghĩa RabbitMQ cluster, MySQL, network bằng code, dựng lại một môi trường giống hệt production trong vài phút.
+
+## 25. Backdated Inventory và Cost Recalculation
+
+`Backdated Inventory` là trường hợp một giao dịch kho được tạo, sửa hoặc hủy ở hiện tại nhưng có ngày hiệu lực nằm trong quá khứ. Thao tác này không chỉ thay đổi tồn kho tại ngày của chứng từ. Với phương pháp giá vốn phụ thuộc vào trạng thái trước đó, nó còn có thể làm thay đổi kết quả của mọi giao dịch đứng phía sau.
+
+Giả sử một hóa đơn xuất kho ngày `10/10/2025` bị hủy vào `31/08/2026`. Nếu hệ thống yêu cầu thẻ kho năm 2025 phải hiển thị như lần xuất đó không còn hiệu lực, chuỗi tính toán từ `10/10/2025` đến hiện tại đã bị thay đổi.
+
+```text
+10/10/2025: xuất 10 sản phẩm theo hóa đơn A
+       ↓
+Các lần nhập và xuất sau đó dùng tồn, giá vốn trước đó làm đầu vào
+       ↓
+31/08/2026: hóa đơn A bị hủy
+```
+
+Tồn hiện tại có thể điều chỉnh bằng cách cộng lại 10 sản phẩm. Giá vốn lịch sử khó hơn: kết quả của dòng sau phụ thuộc kết quả dòng trước, nên thay đổi một dòng cũ có thể tạo hiệu ứng dây chuyền tới cuối lịch sử.
+
+### Phụ thuộc tuần tự của giá vốn bình quân
+
+Với giá vốn bình quân sau mỗi lần nhập, giá vốn mới được tính từ tồn và giá vốn ngay trước giao dịch:
+
+```text
+giaVonMoi =
+    (giaVonCu × tonTruoc + thanhTienNhap)
+    / (tonTruoc + soLuongNhap)
+```
+
+Nếu một giao dịch quá khứ làm thay đổi `tonTruoc` hoặc `giaVonCu`, đầu vào của phép tính kế tiếp cũng thay đổi. Vì thế, các phép tính phía sau không thể được chia tùy ý cho nhiều worker chạy song song.
+
+Snapshot chỉ cung cấp một trạng thái xuất phát gần hơn. Chunk chỉ giới hạn memory và kích thước mỗi lần ghi. RabbitMQ chỉ vận chuyển yêu cầu tính lại. Không cơ chế nào trong số đó loại bỏ được phần lịch sử thực sự đã bị invalid.
+
+Giới hạn này có thể biểu diễn bằng độ phức tạp `O(N)`, trong đó `N` là số giao dịch từ mốc bị ảnh hưởng đến cuối chuỗi. Khi nghiệp vụ yêu cầu sửa đúng lịch sử, hệ thống vẫn phải đọc và tính lại các giao dịch thuộc đoạn này.
+
+### BusinessDate, PostingDate và CostingDate
+
+Các hệ thống quản trị lớn giới hạn backdate trước khi tối ưu thuật toán. Một chứng từ thường có nhiều mốc thời gian với ý nghĩa khác nhau:
+
+| Mốc thời gian | Ý nghĩa |
+|---|---|
+| `businessDate` | Ngày nghiệp vụ thực tế ghi trên chứng từ |
+| `postingDate` | Ngày hệ thống ghi nhận tác động vào sổ đang mở |
+| `costingDate` | Ngày giao dịch tham gia chuỗi tính giá vốn |
+
+Ba mốc này có thể giống nhau trong luồng thông thường nhưng không bắt buộc giống nhau khi chứng từ được nhập muộn hoặc kỳ kế toán đã đóng.
+
+Oracle Supply Chain Cost Management sử dụng `Cost Cutoff Date` để quyết định backdated transaction được cost trong kỳ nào. Giao dịch có ngày quá khứ không mặc nhiên được chèn lại vào mọi kết quả đã xử lý; cost processor xét kỳ và cutoff đang áp dụng. Backdate chỉ được xử lý trong kỳ `Open` hoặc `Pending Close`. Nếu ngày hiệu lực rơi vào kỳ `Closed` hoặc `Final Close`, accounting date được chuyển tới ngày đầu tiên của kỳ mở tiếp theo; khi không tồn tại kỳ mở phù hợp, cost processing không thể hoàn thành. [Oracle: Examples of Backdating of Transactions](https://docs.oracle.com/en/cloud/saas/supply-chain-and-manufacturing/25c/fapma/examples-of-backdating-of-transactions.html)
+
+Microsoft Dynamics 365 phân biệt `Inventory Recalculation` và `Inventory Close`. Sau khi inventory close hoàn thành, hệ thống không cho phép post vào thời điểm trước ngày đóng kho, trừ khi quy trình close được reverse. Chỉ kỳ inventory close gần nhất có thể được reverse trực tiếp. Muốn mở một kỳ cũ hơn, các lần close phía sau phải được reverse lần lượt theo thứ tự ngược. [Microsoft Dynamics 365: Inventory Close](https://learn.microsoft.com/en-us/dynamics365/supply-chain/cost-management/inventory-close)
+
+Đây là business control, không phải thủ thuật performance. Nó ngăn một thao tác thông thường vô tình khởi động phép rebuild rất lớn và thay đổi số liệu của kỳ đã đối soát.
+
+### Reversal trong kỳ đang mở
+
+Khi kỳ năm 2025 đã đóng, cách phổ biến là giữ nguyên giao dịch gốc và tạo một giao dịch đảo trong kỳ hiện tại.
+
+```text
+10/10/2025  Xuất theo hóa đơn A       -10
+31/08/2026  Đảo hóa đơn A             +10
+```
+
+Hóa đơn A chuyển sang trạng thái `Reversed` và liên kết tới giao dịch đảo. Tồn hiện tại nhận lại 10 sản phẩm, còn lịch sử đã chốt không bị viết lại.
+
+Mô hình này giữ được audit trail: hệ thống biết giao dịch nào đã xảy ra, giao dịch nào đã đảo nó và việc điều chỉnh được ghi nhận vào kỳ nào. Martin Fowler mô tả cách tiếp cận này bằng `Reversal Adjustment`: các accounting transaction sai vẫn được giữ lại, còn các accounting entry đối ứng được tạo để triệt tiêu tác động của chúng trước khi ghi nhận kết quả đúng. [Patterns for Accounting](https://martinfowler.com/eaaDev/AccountingNarrative.html)
+
+Reversal không đáp ứng yêu cầu “mở thẻ kho tại mọi ngày trong năm 2025 và nhìn thấy kết quả như hóa đơn chưa từng có”. Khi yêu cầu đó tồn tại, hệ thống phải mở lại kỳ và thực hiện historical recalculation.
+
+### Historical recalculation
+
+Historical recalculation là quy trình xây lại các kết quả phụ thuộc kể từ giao dịch quá khứ bị thay đổi. Nó thường được vận hành như một công việc nền có trạng thái, không phải một phần của HTTP request hủy hóa đơn.
+
+```text
+Hủy hóa đơn
+    ↓
+Ghi thay đổi vào inventory ledger
+    ↓
+Ghi durable recalculation intent
+    ↓
+ACK message
+    ↓
+Worker rebuild từ mốc sớm nhất bị ảnh hưởng
+```
+
+RabbitMQ giúp tách thời gian xử lý dài khỏi request và đánh thức worker. Broker không tính giá vốn, không khóa `InventoryKey` và không chứng minh kết quả tồn kho đã đúng. Durable intent trong database mới là nguồn xác định `requestedVersion`, mốc ảnh hưởng sớm nhất và trạng thái hoàn thành.
+
+Nhiều message của cùng một `InventoryKey` được gộp lại:
+
+```text
+requestedVersion = MAX(version hiện tại, version mới)
+earliestAffectedAt = MIN(mốc hiện tại, mốc mới)
+```
+
+Worker tiếp tục cho tới khi `completedVersion = requestedVersion`. Cơ chế này không làm một lần rebuild nhanh hơn, nhưng ngăn 100 message liên tiếp tạo ra 100 lần rebuild cùng một lịch sử.
+
+### Giới hạn của cursor procedure
+
+Một cách hiện thực trực tiếp là cursor đọc từng thẻ kho, tính kết quả rồi `UPDATE` chính row đó:
+
+```text
+FETCH row
+→ tính tồn và giá vốn
+→ UPDATE row
+→ lặp lại
+```
+
+Phép thử tham chiếu trên MySQL với 50.000 thẻ kho đã bị dừng sau hơn hai phút. Tại thời điểm dừng, procedure mới xử lý khoảng 17.882 row. MySQL session vẫn tiếp tục thực thi sau khi test host bị ngắt và phải được `KILL` riêng.
+
+Con số này chỉ mô tả môi trường test, không phải production benchmark. Tuy nhiên, nó bộc lộ đúng đặc điểm của thiết kế: hàng chục nghìn lần cursor fetch, row lookup, update, index maintenance và transaction logging diễn ra tuần tự. Tăng RabbitMQ consumer hoặc đổi hash key không làm đoạn procedure này chạy song song trên cùng một chuỗi giá vốn.
+
+### Snapshot và replay distance
+
+Snapshot lưu trạng thái đã tính tại một vị trí ổn định:
+
+```text
+inventoryKey
+lastNgayGiaoDich
+lastTheKhoId
+tonCuoi
+giaVonCuoi
+calculationVersion
+```
+
+Khi backdate xảy ra, worker tìm snapshot hợp lệ gần nhất đứng trước giao dịch bị ảnh hưởng và replay từ đó. Nếu snapshot nằm tại giao dịch 40.000 và backdate nằm tại giao dịch 42.000, worker không cần replay 40.000 giao dịch đầu tiên.
+
+Snapshot giảm `replay distance`; nó không đảm bảo đoạn còn lại ngắn. Nếu backdate nằm gần đầu lịch sử, phần lớn chuỗi vẫn phải tính lại. Các snapshot đứng sau mốc backdate cũng trở thành stale và phải được tạo lại.
+
+Thứ tự snapshot phải dùng cặp khóa ổn định:
+
+```text
+ngayGiaoDich, id
+```
+
+Chỉ dùng `id` không đủ vì một giao dịch được tạo sau có thể mang ngày nghiệp vụ cũ. Chỉ dùng `ngayGiaoDich` cũng không đủ vì nhiều giao dịch có thể trùng timestamp.
+
+### Versioned calculation
+
+Để tránh người dùng đọc trạng thái nửa cũ, nửa mới, dữ liệu giao dịch nguồn và kết quả tính toán được tách riêng:
+
+```text
+InventoryLedger
+    Dữ liệu giao dịch nguồn
+
+InventoryCalculation
+    tonDau, tonCuoi, giaVon, tienVon theo calculationVersion
+```
+
+Trong lúc version mới đang được xây, version cũ tiếp tục phục vụ:
+
+```text
+Version 25: Complete, đang được đọc
+Version 26: Building, chưa công khai
+```
+
+`calculationVersion` là thế hệ của projection, ví dụ 25 hoặc 26. `requestedVersion` và `completedVersion` ở phần sau là sequence của thay đổi đầu vào, ví dụ 100 hoặc 101. Một calculation version có thể phải bắt kịp nhiều input sequence trước khi được công khai.
+
+Worker có thể ghi version 26 theo nhiều transaction nhỏ. Các batch trung gian không xuất hiện trong query của người dùng khi mọi read path tuân thủ cùng một invariant: request đọc `currentVersion` một lần, pin giá trị đó trong suốt quá trình đọc và thêm `calculationVersion = currentVersion` vào mọi query kết quả. Với request gồm nhiều query, các query còn phải dùng cùng database snapshot; đọc lại con trỏ giữa chừng vẫn có thể trộn version 25 và 26.
+
+Khi version 26 hoàn thành và đã bắt kịp `requestedVersion`, hệ thống chuyển con trỏ bằng một conditional update:
+
+```sql
+UPDATE inventoryState
+SET currentVersion = 26,
+    completedVersion = 101
+WHERE inventoryKey = @inventoryKey
+  AND currentVersion = 25
+  AND requestedVersion = 101;
+```
+
+Nếu worker chết giữa quá trình, version 25 vẫn nguyên vẹn. Worker khác có thể tiếp tục version 26 từ checkpoint hoặc loại bỏ version chưa hoàn thành. Cơ chế xây projection mới song song rồi chuyển version thường được gọi là blue/green projection rebuild. Marten, một event store và document database cho .NET, cung cấp projection versioning theo cách này. [Marten: Rebuilding Projections](https://martendb.io/events/projections/rebuilding)
+
+Versioned calculation giải quyết tính sẵn sàng và atomic visibility. Nó không làm biến mất chi phí tính toán `O(N)` và làm tăng storage trong thời gian tồn tại đồng thời hai version.
+
+### Giao dịch mới trong lúc rebuild
+
+Worker phải chụp một input boundary trước khi bắt đầu:
+
+```text
+processingVersion = 100
+```
+
+Nếu giao dịch append mới tạo version 101, worker có thể tính thêm delta từ trạng thái cuối version đang xây. Nó không cần replay lại lịch sử vì giao dịch mới đứng sau toàn bộ dữ liệu đã tính.
+
+Nếu version 101 là một backdate nằm trước vị trí worker đã xử lý, suffix vừa xây đã bị invalid. Worker kiểm tra durable intent giữa các batch và quay lại checkpoint trước mốc mới.
+
+```text
+newAffectedAt <= processedUntil
+→ rewind về checkpoint hợp lệ
+
+newAffectedAt > processedUntil
+→ tiếp tục; giao dịch sẽ được đọc khi worker đi tới mốc đó
+```
+
+Backdate liên tục có thể khiến worker liên tục rewind và không hoàn thành. Hệ thống cần giới hạn thao tác backdate theo kỳ, gom thay đổi trong một debounce window hoặc chuyển `InventoryKey` sang maintenance workflow khi vượt ngưỡng retry/rebuild.
+
+### Lựa chọn giải pháp theo invariant
+
+Không có một cơ chế duy nhất phù hợp với mọi chính sách tồn kho. Lựa chọn bắt đầu từ kết quả mà nghiệp vụ yêu cầu bảo vệ:
+
+| Yêu cầu | Cơ chế phù hợp |
+|---|---|
+| Kỳ đã chốt không được thay đổi | Inventory close và reversal trong kỳ hiện tại |
+| Cho phép sửa lịch sử đúng ngày | Historical recalculation từ mốc bị ảnh hưởng |
+| Lịch sử dài, backdate hiếm | Snapshot để giảm replay distance |
+| Rebuild không được làm gián đoạn đọc | Versioned calculation và atomic switch |
+| Nhiều event cùng ảnh hưởng một key | Durable intent, debounce và version coalescing |
+| Cần audit đầy đủ | Immutable ledger và liên kết reversal |
+
+Yêu cầu sau không thể được thỏa mãn đồng thời:
+
+```text
+Sửa một giao dịch cũ
++ cập nhật chính xác mọi giá vốn phụ thuộc phía sau
++ kết quả xuất hiện tức thời
++ không thực hiện chi phí O(N)
+```
+
+Thiết kế production không tìm cách che giấu giới hạn này bằng cách tăng consumer. Nó kiểm soát phạm vi được phép backdate, tách request khỏi rebuild, giữ một version ổn định cho người đọc và đo thời gian hội tụ của mỗi `InventoryKey`.
+
+### Phạm vi triển khai theo tải thực tế
+
+Một production base chưa có business transaction không cần dựng sẵn toàn bộ versioned calculation. Phần tối thiểu nên có là durable intent, idempotency, per-key ownership và trạng thái quan sát được.
+
+Khi xuất hiện dữ liệu thật, hệ thống đo:
+
+- số thẻ trên mỗi `InventoryKey`;
+- khoảng cách từ backdate đến giao dịch cuối;
+- tần suất backdate;
+- thời gian recalculation;
+- lock wait, transaction log và replication lag;
+- số lần worker phải restart hoặc rewind.
+
+Snapshot, versioned projection và maintenance workflow chỉ được bổ sung khi các số đo chứng minh cursor hoặc direct update không còn đáp ứng thời gian hội tụ đã cam kết. Cách phát triển này giữ foundation đơn giản nhưng không khóa đường nâng cấp khi lịch sử tồn kho lớn lên.
