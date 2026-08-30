@@ -584,6 +584,11 @@ const routes: Routes = [
         data: { docSrc: 'assets/docs/dotnet-core/garbage-collector.md' },
       },
       {
+        path: 'rabbitmq-reliable-messaging',
+        component: MarkdownDocComponent,
+        data: { docSrc: 'assets/docs/dotnet-core/rabbitmq-reliable-messaging.md' },
+      },
+      {
         path: 'dependency-injection',
         component: MarkdownDocComponent,
         data: { docSrc: 'assets/docs/dotnet-core/dependency-injection.md' },

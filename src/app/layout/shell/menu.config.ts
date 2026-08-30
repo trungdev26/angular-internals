@@ -271,6 +271,10 @@ export const MENU_SECTIONS: MenuSection[] = addCascadingIndexes(
           items: [
             { label: 'Task, Thread và Process', link: '/dotnet-core/task-thread-process' },
             { label: 'Garbage Collector (GC)', link: '/dotnet-core/garbage-collector' },
+            {
+              label: 'RabbitMQ và Reliable Messaging',
+              link: '/dotnet-core/rabbitmq-reliable-messaging',
+            },
           ],
         },
         {
