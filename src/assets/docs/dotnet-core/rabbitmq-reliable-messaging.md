@@ -540,6 +540,8 @@ Mỗi message publish đi kèm một số property, đóng vai trò như thông 
 | `x-tenant-id` | `event.TenantId` | Scope theo tenant trong hệ thống multi-tenant |
 | `x-shop-id` | `event.ShopId` | Scope theo shop, dùng cùng tenant khi tạo Inbox key và business predicate |
 
+Consumer chuyển các metadata này thành `ConsumedIntegrationMessage` rồi truyền cùng `IUnitOfWork` cho handler. Vì vậy handler dùng `TenantId` và `ShopId` từ transport context đã được validation, thay vì lấy ambient HTTP context hoặc tin vào một field trùng tên trong JSON payload.
+
 ### 5.5 Dependency Injection và readiness
 
 Sau khi đã hoàn thiện quản lý kết nối **Connection Manager** và bộ gửi tin **Publisher**, bước tiếp theo là đăng ký chúng vào **DI container** của .NET để ứng dụng có thể đem ra sử dụng, đồng thời thiết lập cơ chế **Health Check** để giám sát RabbitMQ khi chạy thật:
