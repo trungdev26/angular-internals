@@ -18,7 +18,7 @@ Business case xuyên suốt là một nền tảng đặt đồ ăn multi-tenant
 - Menu có thể dùng chung trong tenant hoặc được đồng bộ xuống chi nhánh.
 - Tồn kho tương lai có thể được theo dõi theo nhiều lô.
 
-Production base hiện chỉ triển khai phần kết nối và publish trên .NET 6. Consumer nghiệp vụ, Outbox, Inbox và FEFO vẫn là reference model đã được kiểm chứng bằng integration test.
+Production base trên .NET 6 đã có connection manager, confirmed publisher, Transactional Outbox, Inbox idempotency, consumer runtime, retry và DLQ. Các phần về `DonHang`, FEFO và tính giá vốn vẫn là business example; foundation không tạo trước entity hoặc routing key nghiệp vụ.
 
 ## 1. Luồng xử lý đồng bộ
 
@@ -403,7 +403,12 @@ Nhờ vậy, nếu sau này đổi từ RabbitMQ sang Kafka, chỉ cần viết 
   "ConnectionName": "food-delivery-api", // tên hiển thị trên Management UI, giúp nhận diện connection
   "ExchangeName": "food.events", // exchange mà publisher sẽ declare và publish vào
   "NetworkRecoverySeconds": 5, // thời gian chờ trước khi client tự thử reconnect sau khi mất kết nối
-  "RequestedHeartbeatSeconds": 30 // chu kỳ heartbeat để phát hiện sớm một connection đã chết
+  "RequestedHeartbeatSeconds": 30, // chu kỳ heartbeat để phát hiện sớm một connection đã chết
+  "TlsEnabled": false, // local Docker không bật TLS
+  "TlsServerName": "", // bắt buộc khi TlsEnabled = true
+  "OutboxBatchSize": 50, // số row tối đa trong một lần claim
+  "OutboxLeaseSeconds": 30, // thời gian worker giữ quyền xử lý row
+  "OutboxPollMilliseconds": 500 // khoảng nghỉ khi không có Outbox row
 }
 ```
 
@@ -533,6 +538,7 @@ Mỗi message publish đi kèm một số property, đóng vai trò như thông 
 | `CorrelationId` | `event.CorrelationId` | Mã vết nối HTTP request, Outbox, broker và consumer logs |
 | `x-event-version` | `event.ContractVersion` | Version schema, cho phép producer/consumer rolling deployment mà không đoán cấu trúc dữ liệu |
 | `x-tenant-id` | `event.TenantId` | Scope theo tenant trong hệ thống multi-tenant |
+| `x-shop-id` | `event.ShopId` | Scope theo shop, dùng cùng tenant khi tạo Inbox key và business predicate |
 
 ### 5.5 Dependency Injection và readiness
 
@@ -967,17 +973,21 @@ Bốn worker sau thay đổi claim đủ 100 intent. `SKIP LOCKED` chỉ tạo c
 Schema tối thiểu cho bảng Outbox:
 
 ```sql
-CREATE TABLE OutboxMessage (
-    Id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    MessageId CHAR(36) NOT NULL,
+CREATE TABLE OutboxMessages (
+    Id CHAR(36) PRIMARY KEY,
+    EventName VARCHAR(200) NOT NULL,
+    ContractVersion INT NOT NULL,
     RoutingKey VARCHAR(200) NOT NULL,
     Payload JSON NOT NULL,
     OccurredAtUtc DATETIME(6) NOT NULL,
+    CorrelationId VARCHAR(100) NULL,
+    TenantId CHAR(36) NULL,
+    ShopId CHAR(36) NULL,
     SentAtUtc DATETIME(6) NULL,
     LockedBy VARCHAR(100) NULL,
     LockedUntilUtc DATETIME(6) NULL,
-    -- filter column (SentAtUtc, LockedUntilUtc) đứng trước order column (OccurredAtUtc, Id),
-    -- đúng bài học từ war story ở trên
+    Attempts INT NOT NULL DEFAULT 0,
+    LastError VARCHAR(4000) NULL,
     INDEX idx_claim (SentAtUtc, LockedUntilUtc, OccurredAtUtc, Id)
 );
 ```
@@ -985,56 +995,33 @@ CREATE TABLE OutboxMessage (
 Use case ghi business state và Outbox trong cùng transaction, đúng sơ đồ ở đầu mục:
 
 ```csharp
-await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+await using var uow = await unitOfWorkFactory.CreateAsync(cancellationToken);
 
-var donHang = new DonHang(request);
-db.DonHang.Add(donHang);
+// Business module thay đoạn này bằng mutation thật trên chính uow.DbContext.
+uow.EnqueueIntegrationEvent(donHangDaTao, "order.created");
 
-db.OutboxMessage.Add(new OutboxMessage
-{
-    MessageId = Guid.NewGuid(),
-    RoutingKey = "order.created",
-    Payload = JsonSerializer.Serialize(new DonHangDaTaoEvent(donHang.Id, request.Email)),
-    OccurredAtUtc = DateTimeOffset.UtcNow
-});
-
-await db.SaveChangesAsync(cancellationToken);
-await transaction.CommitAsync(cancellationToken);
+await uow.CommitAsync(cancellationToken);
 ```
 
 Dispatcher claim một bounded batch bằng lease, publish, rồi mark sent:
 
 ```csharp
-var dispatcherId = Environment.MachineName;
-var now = DateTimeOffset.UtcNow;
-var leaseUntil = now.AddSeconds(30);
+var batch = await ClaimAsync(cancellationToken);
+// ClaimAsync dùng transaction ngắn: SELECT ... FOR UPDATE SKIP LOCKED,
+// ghi LockedBy/LockedUntilUtc rồi COMMIT trước khi trả batch.
 
-var batch = await db.OutboxMessage
-    .FromSqlInterpolated($@"
-        SELECT * FROM OutboxMessage
-        WHERE SentAtUtc IS NULL
-          AND (LockedUntilUtc IS NULL OR LockedUntilUtc < {now})
-        ORDER BY OccurredAtUtc, Id
-        LIMIT 50
-        FOR UPDATE SKIP LOCKED")
-    .ToListAsync(cancellationToken);
-
-foreach (var message in batch)
+foreach (var row in batch)
 {
-    message.LockedBy = dispatcherId;
-    message.LockedUntilUtc = leaseUntil;
-}
-await db.SaveChangesAsync(cancellationToken); // chốt lease trước khi publish
+    await publisher.PublishRawAsync(
+        row.ToIntegrationMessage(),
+        row.RoutingKey,
+        cancellationToken); // chờ Publisher Confirm
 
-foreach (var message in batch)
-{
-    await publisher.PublishAsync(message.RoutingKey, message.Payload, cancellationToken); // chờ Publisher Confirm
-    message.SentAtUtc = DateTimeOffset.UtcNow;
-    await db.SaveChangesAsync(cancellationToken); // mark sent ngay sau khi confirm, đúng từng message một
+    await MarkSentAsync(row.Id, cancellationToken);
 }
 ```
 
-Production base hiện chưa thêm schema và dispatcher này vào production thật, vì chưa có business write nào sở hữu event cần phát. Tạo schema và worker chung chung từ trước sẽ buộc business sau này thích nghi với một contract chưa được xác định — code trên là reference implementation, đã kiểm chứng bằng integration test.
+Production base lưu Outbox ở `OutboxMessages` và chạy `OutboxDispatcher` trên mọi instance. Foundation chỉ định nghĩa transport metadata và lease; business module vẫn sở hữu event contract, routing key và thời điểm gọi `EnqueueIntegrationEvent`.
 
 ## 14. Ordering trong hệ thống đa instance
 
@@ -1417,30 +1404,15 @@ Foundation hiện chạy trên .NET 6 và `RabbitMQ.Client 7.2.2`.
 
 Việc nâng runtime không làm thay đổi các invariant về ACK, idempotency, Outbox hoặc concurrency.
 
-## 21. Phạm vi của Production Foundation
+#### Messaging Diagnostics trong Development
 
-Đối chiếu với `FoodDelivery.Infrastructure`, đây là trạng thái hiện tại của từng hạng mục đã phân tích xuyên suốt bài:
+API map `/dev/messaging` khi ứng dụng chạy trong Development. Nút **Gửi test event qua Outbox** tạo một `DiagnosticPing` bằng chính `IUnitOfWork`; trang hiển thị trạng thái `Pending` hoặc `Sent`, số lần claim, `LastError` và số message đã tới queue `food.diagnostics`.
 
-- Validated `RabbitMqOptions` -- đã làm (mục 5.2).
-- Một long-lived connection manager trên mỗi process -- đã làm (mục 5.3).
-- Confirmed persistent publisher với mandatory routing -- đã làm (mục 5.4, 12).
-- Integration-event wire metadata -- đã làm (mục 5.1).
-- Automatic connection/topology recovery -- đã làm (mục 5.3).
-- Readiness health check -- đã làm (mục 5.5).
-- Integration tests chạy với RabbitMQ thật -- đã làm.
-- Business queue và consumer -- chưa làm (mục 3, 7).
-- Outbox/Inbox schema cùng dispatcher -- chưa làm (mục 9, 13).
-- Retry/DLQ topology -- chưa làm (mục 11).
-- Aggregate version handler -- chưa làm (mục 14).
-- Inventory allocator và strict FEFO -- chưa làm (mục 15).
-- Quorum queue / cluster topology cho production -- chưa làm (mục 16).
-- Metrics, alert và runbook cho RabbitMQ -- chưa làm (mục 18, 20).
-- Secret management, TLS và least-privilege cho credential -- chưa làm (mục 5.2, 20).
-- Capacity plan đo trên traffic production thật -- chưa làm (mục 19).
+Luồng này kiểm tra MySQL transaction, Outbox dispatcher, Publisher Confirm, mandatory routing và RabbitMQ connection mà không cần sửa frontend. Endpoint không được map trong production; đây là công cụ chẩn đoán, không phải business API.
 
-Những phần "chưa làm" không bị bỏ quên. Chúng đang ở test-only reference implementation để chứng minh failure model trước khi business module thật xác định transaction, table ownership và contract.
+Meter `FoodDelivery.Messaging` phát các counter cho publish, publish failure, Outbox claim, consume, duplicate, retry và dead-letter. Không dùng `TenantId`, `ShopId` hoặc `MessageId` làm metric tag vì các giá trị đó tạo cardinality theo dữ liệu nghiệp vụ.
 
-## 22. Thuật ngữ
+## 21. Thuật ngữ
 
 | Keyword | Ý nghĩa |
 |---|---|
@@ -1464,7 +1436,7 @@ Những phần "chưa làm" không bị bỏ quên. Chúng đang ở test-only r
 | FEFO | Xuất lô hết hạn sớm trước |
 | Poison message | Message luôn thất bại với handler hiện tại |
 
-## 23. Tài liệu tham khảo
+## 22. Tài liệu tham khảo
 
 - [RabbitMQ Tutorials](https://www.rabbitmq.com/tutorials) — học topology theo thứ tự Hello World, Work Queue, Publish/Subscribe và Routing.
 - [AMQP 0-9-1 Model Explained](https://www.rabbitmq.com/tutorials/amqp-concepts) — bản chất exchange, queue, binding, ACK và prefetch.
@@ -1472,7 +1444,7 @@ Những phần "chưa làm" không bị bỏ quên. Chúng đang ở test-only r
 - [Consumer Acknowledgements and Publisher Confirms](https://www.rabbitmq.com/docs/confirms) — hai chiều reliability độc lập.
 - [Quorum Queues](https://www.rabbitmq.com/docs/quorum-queues) — replication, majority và failure behavior.
 
-## 24. Hướng mở rộng tiếp theo
+## 23. Hướng mở rộng tiếp theo
 
 Toàn bộ bài chỉ xoay quanh RabbitMQ trong phạm vi một service. Khi hệ thống lớn lên và tách thành nhiều service độc lập, bốn nhóm chủ đề dưới đây là hướng mở rộng tự nhiên tiếp theo.
 
@@ -1505,9 +1477,9 @@ Thiết kế theo giả định "mọi thứ rồi sẽ sập":
 - **Kubernetes và autoscaling theo message** — dùng KEDA để tự tăng/giảm số worker dựa trên `Ready` rate của RabbitMQ (mục 18) thay vì chỉ dựa vào CPU/RAM.
 - **Infrastructure as code** (Terraform, Pulumi) — định nghĩa RabbitMQ cluster, MySQL, network bằng code, dựng lại một môi trường giống hệt production trong vài phút.
 
-## 25. Backdated Inventory và Cost Recalculation
+## 24. Backdated Inventory và Cost Recalculation
 
-`Backdated Inventory` là trường hợp một giao dịch kho được tạo, sửa hoặc hủy ở hiện tại nhưng có ngày hiệu lực nằm trong quá khứ. Thao tác này không chỉ thay đổi tồn kho tại ngày của chứng từ. Với phương pháp giá vốn phụ thuộc vào trạng thái trước đó, nó còn có thể làm thay đổi kết quả của mọi giao dịch đứng phía sau.
+Mục 15 giải quyết tranh chấp khi nhiều giao dịch cùng tranh nhau một tài nguyên tồn kho tại cùng một thời điểm. `Backdated Inventory` là một lớp bài toán tồn kho khác: không phải hai giao dịch tranh chấp cùng lúc, mà một giao dịch mới làm thay đổi ý nghĩa của một giao dịch đã xảy ra trong quá khứ — trường hợp một giao dịch kho được tạo, sửa hoặc hủy ở hiện tại nhưng có ngày hiệu lực nằm trong quá khứ. Thao tác này không chỉ thay đổi tồn kho tại ngày của chứng từ. Với phương pháp giá vốn phụ thuộc vào trạng thái trước đó, nó còn có thể làm thay đổi kết quả của mọi giao dịch đứng phía sau.
 
 Giả sử một hóa đơn xuất kho ngày `10/10/2025` bị hủy vào `31/08/2026`. Nếu hệ thống yêu cầu thẻ kho năm 2025 phải hiển thị như lần xuất đó không còn hiệu lực, chuỗi tính toán từ `10/10/2025` đến hiện tại đã bị thay đổi.
 
@@ -1549,7 +1521,7 @@ Các hệ thống quản trị lớn giới hạn backdate trước khi tối ư
 
 Ba mốc này có thể giống nhau trong luồng thông thường nhưng không bắt buộc giống nhau khi chứng từ được nhập muộn hoặc kỳ kế toán đã đóng.
 
-Oracle Supply Chain Cost Management sử dụng `Cost Cutoff Date` để quyết định backdated transaction được cost trong kỳ nào. Giao dịch có ngày quá khứ không mặc nhiên được chèn lại vào mọi kết quả đã xử lý; cost processor xét kỳ và cutoff đang áp dụng. Backdate chỉ được xử lý trong kỳ `Open` hoặc `Pending Close`. Nếu ngày hiệu lực rơi vào kỳ `Closed` hoặc `Final Close`, accounting date được chuyển tới ngày đầu tiên của kỳ mở tiếp theo; khi không tồn tại kỳ mở phù hợp, cost processing không thể hoàn thành. [Oracle: Examples of Backdating of Transactions](https://docs.oracle.com/en/cloud/saas/supply-chain-and-manufacturing/25c/fapma/examples-of-backdating-of-transactions.html)
+Oracle Supply Chain Cost Management sử dụng `Cost Cutoff Date` để quyết định backdated transaction được cost trong kỳ nào. Giao dịch có ngày quá khứ không mặc nhiên được chèn lại vào mọi kết quả đã xử lý — cost processor xét kỳ và cutoff đang áp dụng. Backdate chỉ được xử lý trong kỳ `Open` hoặc `Pending Close`. Nếu ngày hiệu lực rơi vào kỳ `Closed` hoặc `Final Close`, accounting date được chuyển tới ngày đầu tiên của kỳ mở tiếp theo — khi không tồn tại kỳ mở phù hợp, cost processing không thể hoàn thành. [Oracle: Examples of Backdating of Transactions](https://docs.oracle.com/en/cloud/saas/supply-chain-and-manufacturing/25c/fapma/examples-of-backdating-of-transactions.html)
 
 Microsoft Dynamics 365 phân biệt `Inventory Recalculation` và `Inventory Close`. Sau khi inventory close hoàn thành, hệ thống không cho phép post vào thời điểm trước ngày đóng kho, trừ khi quy trình close được reverse. Chỉ kỳ inventory close gần nhất có thể được reverse trực tiếp. Muốn mở một kỳ cũ hơn, các lần close phía sau phải được reverse lần lượt theo thứ tự ngược. [Microsoft Dynamics 365: Inventory Close](https://learn.microsoft.com/en-us/dynamics365/supply-chain/cost-management/inventory-close)
 
@@ -1627,7 +1599,7 @@ calculationVersion
 
 Khi backdate xảy ra, worker tìm snapshot hợp lệ gần nhất đứng trước giao dịch bị ảnh hưởng và replay từ đó. Nếu snapshot nằm tại giao dịch 40.000 và backdate nằm tại giao dịch 42.000, worker không cần replay 40.000 giao dịch đầu tiên.
 
-Snapshot giảm `replay distance`; nó không đảm bảo đoạn còn lại ngắn. Nếu backdate nằm gần đầu lịch sử, phần lớn chuỗi vẫn phải tính lại. Các snapshot đứng sau mốc backdate cũng trở thành stale và phải được tạo lại.
+Snapshot giảm `replay distance` — nó không đảm bảo đoạn còn lại ngắn. Nếu backdate nằm gần đầu lịch sử, phần lớn chuỗi vẫn phải tính lại. Các snapshot đứng sau mốc backdate cũng trở thành stale và phải được tạo lại.
 
 Thứ tự snapshot phải dùng cặp khóa ổn định:
 
@@ -1658,7 +1630,7 @@ Version 26: Building, chưa công khai
 
 `calculationVersion` là thế hệ của projection, ví dụ 25 hoặc 26. `requestedVersion` và `completedVersion` ở phần sau là sequence của thay đổi đầu vào, ví dụ 100 hoặc 101. Một calculation version có thể phải bắt kịp nhiều input sequence trước khi được công khai.
 
-Worker có thể ghi version 26 theo nhiều transaction nhỏ. Các batch trung gian không xuất hiện trong query của người dùng khi mọi read path tuân thủ cùng một invariant: request đọc `currentVersion` một lần, pin giá trị đó trong suốt quá trình đọc và thêm `calculationVersion = currentVersion` vào mọi query kết quả. Với request gồm nhiều query, các query còn phải dùng cùng database snapshot; đọc lại con trỏ giữa chừng vẫn có thể trộn version 25 và 26.
+Worker có thể ghi version 26 theo nhiều transaction nhỏ. Các batch trung gian không xuất hiện trong query của người dùng khi mọi read path tuân thủ cùng một invariant: request đọc `currentVersion` một lần, pin giá trị đó trong suốt quá trình đọc và thêm `calculationVersion = currentVersion` vào mọi query kết quả. Với request gồm nhiều query, các query còn phải dùng cùng database snapshot — đọc lại con trỏ giữa chừng vẫn có thể trộn version 25 và 26.
 
 Khi version 26 hoàn thành và đã bắt kịp `requestedVersion`, hệ thống chuyển con trỏ bằng một conditional update:
 
@@ -1692,7 +1664,7 @@ newAffectedAt <= processedUntil
 → rewind về checkpoint hợp lệ
 
 newAffectedAt > processedUntil
-→ tiếp tục; giao dịch sẽ được đọc khi worker đi tới mốc đó
+→ tiếp tục, giao dịch sẽ được đọc khi worker đi tới mốc đó
 ```
 
 Backdate liên tục có thể khiến worker liên tục rewind và không hoàn thành. Hệ thống cần giới hạn thao tác backdate theo kỳ, gom thay đổi trong một debounce window hoặc chuyển `InventoryKey` sang maintenance workflow khi vượt ngưỡng retry/rebuild.
@@ -1727,11 +1699,11 @@ Một production base chưa có business transaction không cần dựng sẵn t
 
 Khi xuất hiện dữ liệu thật, hệ thống đo:
 
-- số thẻ trên mỗi `InventoryKey`;
-- khoảng cách từ backdate đến giao dịch cuối;
-- tần suất backdate;
-- thời gian recalculation;
-- lock wait, transaction log và replication lag;
-- số lần worker phải restart hoặc rewind.
+- Số thẻ trên mỗi `InventoryKey`.
+- Khoảng cách từ backdate đến giao dịch cuối.
+- Tần suất backdate.
+- Thời gian recalculation.
+- Lock wait, transaction log và replication lag.
+- Số lần worker phải restart hoặc rewind.
 
 Snapshot, versioned projection và maintenance workflow chỉ được bổ sung khi các số đo chứng minh cursor hoặc direct update không còn đáp ứng thời gian hội tụ đã cam kết. Cách phát triển này giữ foundation đơn giản nhưng không khóa đường nâng cấp khi lịch sử tồn kho lớn lên.
